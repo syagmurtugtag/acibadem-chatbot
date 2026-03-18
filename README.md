@@ -10,9 +10,9 @@ Containerized with Docker and Docker Compose.
 
 \## Team Members
 
-\- \[Name 1] - \[Student ID]
+\- Selin Yagmur Tugtag - 221401703
 
-\- \[Name 2] - \[Student ID]
+\- Mehmet Emir Altinsoy - 231401704
 
 
 
@@ -32,17 +32,19 @@ Containerized with Docker and Docker Compose.
 
 1\. Clone the repository
 
-2\. Copy .env.example to .env
+2\. Copy `.env.example` to `.env`
 
-3\. Run: docker-compose up --build
+3\. Run: `docker-compose up --build`
 
-4\. Run scraper: docker-compose exec webapp python manage.py scrape
+4\. Run scraper: `docker-compose exec webapp python manage.py scrape`
 
 5\. Visit: http://localhost:8000
 
 
 
 \## Project Structure
+
+```
 
 acibadem-chatbot/
 
@@ -67,4 +69,10 @@ acibadem-chatbot/
 &#x20;   ├── scraper/
 
 &#x20;   └── templates/
+
+```
+
+
+
+
 
