@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ACU AI Chatbot</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 40px auto; padding: 20px; }
+        h1 { color: #1F4E79; text-align: center; margin-bottom: 10px; }
+        .subtitle { text-align: center; color: #666; margin-bottom: 30px; font-size: 14px; }
+        .chat-box { background: white; border-radius: 10px; padding: 20px; 
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 20px; 
+                    min-height: 300px; max-height: 400px; overflow-y: auto; }
+        .message { margin-bottom: 15px; }
+        .message.user { text-align: right; }
+        .message.bot { text-align: left; }
+        .bubble { display: inline-block; padding: 10px 15px; border-radius: 10px; 
+                  max-width: 70%; font-size: 14px; }
+        .user .bubble { background: #1F4E79; color: white; }
+        .bot .bubble { background: #e8f0fe; color: #333; }
+        .input-area { display: flex; gap: 10px; }
+        input[type="text"] { flex: 1; padding: 12px; border: 2px solid #ddd; 
+                             border-radius: 8px; font-size: 14px; outline: none; }
+        input[type="text"]:focus { border-color: #1F4E79; }
+        button { padding: 12px 24px; background: #1F4E79; color: white; 
+                 border: none; border-radius: 8px; cursor: pointer; font-size: 14px; }
+        button:hover { background: #2E75B6; }
+        button:disabled { background: #aaa; cursor: not-allowed; }
+        .history { background: white; border-radius: 10px; padding: 20px;
+                   box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .history h2 { color: #1F4E79; margin-bottom: 15px; font-size: 16px; }
+        .history-item { border-bottom: 1px solid #eee; padding: 10px 0; font-size: 13px; }
+        .history-item:last-child { border-bottom: none; }
+        .history-item .q { color: #1F4E79; font-weight: bold; }
+        .history-item .a { color: #555; margin-top: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ACU AI Chatbot</h1>
+        <p class="subtitle">Ask questions about Acibadem University double major programs</p>
+
+        <div class="chat-box" id="chatBox">
+            <div class="message bot">
+                <span class="bubble">Hello! I can answer your questions about 
+                Acibadem University, especially double major programs. 
+                How can I help you?</span>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <input type="text" id="questionInput" 
+                   placeholder="Ask a question about double major programs..." 
+                   onkeypress="if(event.key==='Enter') sendMessage()">
+            <button onclick="sendMessage()" id="sendBtn">Send</button>
+        </div>
+
+        {% if messages %}
+        <div class="history" style="margin-top: 30px;">
+            <h2>Recent Conversations</h2>
+            {% for msg in messages %}
+            <div class="history-item">
+                <div class="q">Q: {{ msg.question }}</div>
+                <div class="a">A: {{ msg.answer }}</div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+
+    <script>
+        function sendMessage() {
+            const input = document.getElementById('questionInput');
+            const question = input.value.trim();
+            if (!question) return;
+
+            const chatBox = document.getElementById('chatBox');
+            const btn = document.getElementById('sendBtn');
+
+            // Show user message
+            chatBox.innerHTML += `
+                <div class="message user">
+                    <span class="bubble">${question}</span>
+                </div>`;
+            
+            input.value = '';
+            btn.disabled = true;
+            btn.textContent = 'Thinking...';
+
+            // Show loading
+            chatBox.innerHTML += `
+                <div class="message bot" id="loading">
+                    <span class="bubble">...</span>
+                </div>`;
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            fetch('/api/chat/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question: question })
+            })
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById('loading').remove();
+                const answer = data.answer || data.error || 'No response received.';
+                chatBox.innerHTML += `
+                    <div class="message bot">
+                        <span class="bubble">${answer}</span>
+                    </div>`;
+                chatBox.scrollTop = chatBox.scrollHeight;
+                btn.disabled = false;
+                btn.textContent = 'Send';
+            })
+            .catch(() => {
+                document.getElementById('loading').remove();
+                chatBox.innerHTML += `
+                    <div class="message bot">
+                        <span class="bubble">Connection error. Please try again.</span>
+                    </div>`;
+                btn.disabled = false;
+                btn.textContent = 'Send';
+            });
+        }
+    </script>
+</body>
+</html>
