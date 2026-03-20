@@ -13,8 +13,16 @@ class KnowledgeBase(models.Model):
     class Meta:
         verbose_name_plural = "Knowledge Base"
 
+class Conversation(models.Model):
+    title = models.CharField(max_length=255, default="New Conversation")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.title} - {self.created_at.strftime('%d/%m/%Y %H:%M')}"
 
 class ChatMessage(models.Model):
+    conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name='messages', null=True, blank=True)
+    
     question = models.TextField()
     answer = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)

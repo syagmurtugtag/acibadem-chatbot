@@ -1,72 +1,119 @@
-import json
+﻿import json
 import requests
 from django.shortcuts import render
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
-from .models import KnowledgeBase, ChatMessage
-
+from django.db.models import Q
+from .models import KnowledgeBase, ChatMessage, Conversation
 
 def chat_view(request):
-    messages = ChatMessage.objects.all()[:20]
-    return render(request, 'chat/index.html', {'messages': messages})
+    conversations = Conversation.objects.all().order_by('-created_at')[:20]
+    return render(request, 'chat/index.html', {'conversations': conversations})
 
+def expand_query_terms(question):
+    q = question.lower()
+    keyword_map = {
+        "double major": ["cift anadal", "cap", "double major", "ikinci anadal"],
+        "minor": ["yandal", "minor", "yan dal"],
+        "gpa": ["gano", "ortalama", "gpa", "basari notu"],
+        "application": ["basvuru", "application", "apply", "muracaat"],
+        "requirements": ["kosullar", "sartlar", "gereklilikler", "requirements", "criteria"],
+        "course": ["ders", "course", "dersler"],
+        "credits": ["kredi", "ects", "akts", "credit"],
+    }
+    terms = [question.strip()]
+    for eng, variants in keyword_map.items():
+        if eng in q:
+            terms.extend(variants)
+    return list(set([t for t in terms if t]))
 
 @csrf_exempt
 def api_chat(request):
     if request.method != 'POST':
         return JsonResponse({'error': 'Only POST allowed'}, status=405)
-
     try:
         data = json.loads(request.body)
         question = data.get('question', '').strip()
+        conversation_id = data.get('conversation_id')
+
         if not question:
             return JsonResponse({'error': 'Question is required'}, status=400)
 
-        # Retrieve relevant context from database
-        results = KnowledgeBase.objects.filter(
-            content__icontains=question.split()[0]
-        )[:3]
+        if conversation_id:
+            try:
+                conversation = Conversation.objects.get(id=conversation_id)
+            except Conversation.DoesNotExist:
+                conversation = Conversation.objects.create(title=question[:50])
+        else:
+            conversation = Conversation.objects.create(title=question[:50])
+
+        search_terms = expand_query_terms(question)
+        query = Q()
+        for term in search_terms:
+            query |= Q(title__icontains=term)
+            query |= Q(content__icontains=term)
+            query |= Q(topic__icontains=term)
+
+        results = KnowledgeBase.objects.filter(query).distinct()[:5]
+        if not results.exists():
+            results = KnowledgeBase.objects.all().order_by('-scraped_at')[:5]
 
         context = '\n\n'.join([
-            f"Source: {r.title}\n{r.content[:500]}"
+            f"Source: {r.title}\n{r.content[:2000]}"
             for r in results
         ])
 
-        if not context:
-            context = "No specific information found in the knowledge base."
+        if not context or results.count() == 0:
+            context = "The knowledge base is currently empty."
 
-        # Build prompt
-        prompt = f"""You are an assistant for Acibadem University. Answer questions using only the context below.
-If the answer is not in the context, say so clearly. Do not invent information.
+        prompt = f"""You are the Acibadem University Academic Assistant.
 
-Context:
+STRICT RULES:
+- Use ONLY the provided TEXT to answer.
+- DO NOT use phrases like "Based on the text" or "In other words".
+- Maximum 2 short sentences.
+- If the answer is not in the TEXT, say: "I am sorry, I could not find specific information about this."
+- Answer in the same language as the QUESTION.
+
+TEXT:
 {context}
 
-Question: {question}
-Answer:"""
+QUESTION:
+{question}
 
-        # Call Ollama API
+ANSWER:"""
+
         response = requests.post(
             f"{settings.OLLAMA_URL}/api/generate",
             json={
                 "model": "llama3.2:3b",
                 "prompt": prompt,
-                "stream": False
+                "stream": False,
+                "options": {
+                    "temperature": 0.1,
+                    "top_p": 0.9,
+                    "num_predict": 100
+                }
             },
-            timeout=60
+            timeout=120
         )
         response.raise_for_status()
         answer = response.json().get('response', '').strip()
 
-        # Save to database
-        ChatMessage.objects.create(question=question, answer=answer)
+        for phrase in ["Based on the text,", "According to the context,", "In other words,"]:
+            answer = answer.replace(phrase, "")
+        answer = answer.strip()
 
-        return JsonResponse({'answer': answer})
+        ChatMessage.objects.create(
+            conversation=conversation,
+            question=question,
+            answer=answer
+        )
+
+        return JsonResponse({'answer': answer, 'conversation_id': conversation.id})
 
     except requests.exceptions.ConnectionError:
-        return JsonResponse({'error': 'LLM service is currently unavailable. Please try again later.'}, status=503)
-    except requests.exceptions.Timeout:
-        return JsonResponse({'error': 'The request timed out. Please try again.'}, status=503)
+        return JsonResponse({'error': 'LLM service is not running.'}, status=503)
     except Exception as e:
-        return JsonResponse({'error': 'An unexpected error occurred.'}, status=500)
+        return JsonResponse({'error': f'System Error: {str(e)}'}, status=500)
