@@ -18,40 +18,76 @@ def get_conversation(request, conv_id):
         data = {
             'id': conversation.id,
             'title': conversation.title,
-            'messages': [
-                {'question': m.question, 'answer': m.answer}
-                for m in messages
-            ]
+            'messages': [{'question': m.question, 'answer': m.answer} for m in messages]
         }
         return JsonResponse(data)
     except Conversation.DoesNotExist:
         return JsonResponse({'error': 'Not found'}, status=404)
 
-def expand_query_terms(question):
+def get_relevant_context(question):
     q = question.lower()
-    keyword_map = {
-        "double major": ["cift anadal", "cap", "double major", "ikinci anadal"],
-        "minor": ["yandal", "minor", "yan dal"],
-        "gpa": ["gano", "ortalama", "gpa", "basari notu"],
-        "application": ["basvuru", "application", "apply", "muracaat"],
-        "requirements": ["kosullar", "sartlar", "gereklilikler", "requirements", "criteria"],
-        "course": ["ders", "course", "dersler"],
-        "credits": ["kredi", "ects", "akts", "credit"],
-        "biomedical": ["biomedical", "biyomedikal"],
-        "computer engineering": ["computer engineering", "bilgisayar muhendisligi"],
-        "molecular": ["molecular biology", "molekuler biyoloji"],
-        "psychology": ["psychology", "psikoloji"],
-        "nursing": ["nursing", "hemsirelik"],
-        "nutrition": ["nutrition", "beslenme"],
-        "physiotherapy": ["physiotherapy", "fizyoterapi"],
-        "health management": ["health management", "saglik yonetimi"],
-        "sociology": ["sociology", "sosyoloji"],
+    
+    department_keywords = {
+        'undergraduate_cap': [
+            'biomedical engineering', 'molecular biology', 'psychology', 
+            'computer engineering', 'nursing', 'nutrition', 'physiotherapy',
+            'health management', 'sociology', 'medicine', 'pharmacy',
+            'biyomedikal', 'psikoloji', 'hemsirelik', 'beslenme', 'saglik',
+            'sosyoloji', 'tip', 'eczacilik'
+        ],
+        'minor': ['minor', 'yandal'],
+        'double_major_rules': ['gpa', 'gano', 'requirement', 'apply', 'application', 
+                               'semester', 'credit', 'basvuru', 'sart', 'koşul'],
+        'associate': ['vocational', 'associate', 'onlisans', 'meslek'],
     }
-    terms = [question.strip()]
-    for eng, variants in keyword_map.items():
-        if eng in q:
-            terms.extend(variants)
-    return list(set([t for t in terms if t]))
+    
+    matched_topics = []
+    for topic, keywords in department_keywords.items():
+        for kw in keywords:
+            if kw in q:
+                matched_topics.append(topic)
+                break
+    
+    if not matched_topics:
+        results = KnowledgeBase.objects.all().order_by('-scraped_at')[:3]
+        return '\n\n'.join([f"Source: {r.title}\n{r.content[:2000]}" for r in results])
+    
+    context_parts = []
+    
+    if 'undergraduate_cap' in matched_topics:
+        records = KnowledgeBase.objects.filter(
+            Q(title__icontains='Undergraduate') | Q(title__icontains='Department Options')
+        )[:3]
+        for r in records:
+            context_parts.append(f"Source: {r.title}\n{r.content[:3000]}")
+    
+    if 'minor' in matched_topics:
+        records = KnowledgeBase.objects.filter(
+            Q(title__icontains='Minor') | Q(topic__icontains='minor')
+        )[:3]
+        for r in records:
+            context_parts.append(f"Source: {r.title}\n{r.content[:2000]}")
+    
+    if 'double_major_rules' in matched_topics:
+        records = KnowledgeBase.objects.filter(
+            Q(title__icontains='Application') | Q(title__icontains='Requirements') | 
+            Q(title__icontains='Directive')
+        )[:3]
+        for r in records:
+            context_parts.append(f"Source: {r.title}\n{r.content[:2000]}")
+    
+    if 'associate' in matched_topics:
+        records = KnowledgeBase.objects.filter(
+            Q(title__icontains='Associate') | Q(title__icontains='Vocational')
+        )[:2]
+        for r in records:
+            context_parts.append(f"Source: {r.title}\n{r.content[:2000]}")
+    
+    if not context_parts:
+        records = KnowledgeBase.objects.all().order_by('-scraped_at')[:3]
+        context_parts = [f"Source: {r.title}\n{r.content[:2000]}" for r in records]
+    
+    return '\n\n'.join(context_parts)
 
 @csrf_exempt
 def api_chat(request):
@@ -73,23 +109,9 @@ def api_chat(request):
         else:
             conversation = Conversation.objects.create(title=question[:50])
 
-        search_terms = expand_query_terms(question)
-        query = Q()
-        for term in search_terms:
-            query |= Q(title__icontains=term)
-            query |= Q(content__icontains=term)
-            query |= Q(topic__icontains=term)
+        context = get_relevant_context(question)
 
-        results = KnowledgeBase.objects.filter(query).distinct()[:5]
-        if not results.exists():
-            results = KnowledgeBase.objects.all().order_by('-scraped_at')[:5]
-
-        context = '\n\n'.join([
-            f"Source: {r.title}\n{r.content[:3000]}"
-            for r in results
-        ])
-
-        if not context or results.count() == 0:
+        if not context:
             context = "The knowledge base is currently empty."
 
         prompt = f"""You are the Acibadem University Academic Assistant.
