@@ -11,6 +11,22 @@ def chat_view(request):
     conversations = Conversation.objects.all().order_by('-created_at')[:20]
     return render(request, 'chat/index.html', {'conversations': conversations})
 
+def get_conversation(request, conv_id):
+    try:
+        conversation = Conversation.objects.get(id=conv_id)
+        messages = ChatMessage.objects.filter(conversation=conversation).order_by('created_at')
+        data = {
+            'id': conversation.id,
+            'title': conversation.title,
+            'messages': [
+                {'question': m.question, 'answer': m.answer}
+                for m in messages
+            ]
+        }
+        return JsonResponse(data)
+    except Conversation.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+
 def expand_query_terms(question):
     q = question.lower()
     keyword_map = {
