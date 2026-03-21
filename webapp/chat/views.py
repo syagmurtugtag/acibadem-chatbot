@@ -37,6 +37,15 @@ def expand_query_terms(question):
         "requirements": ["kosullar", "sartlar", "gereklilikler", "requirements", "criteria"],
         "course": ["ders", "course", "dersler"],
         "credits": ["kredi", "ects", "akts", "credit"],
+        "biomedical": ["biomedical", "biyomedikal"],
+        "computer engineering": ["computer engineering", "bilgisayar muhendisligi"],
+        "molecular": ["molecular biology", "molekuler biyoloji"],
+        "psychology": ["psychology", "psikoloji"],
+        "nursing": ["nursing", "hemsirelik"],
+        "nutrition": ["nutrition", "beslenme"],
+        "physiotherapy": ["physiotherapy", "fizyoterapi"],
+        "health management": ["health management", "saglik yonetimi"],
+        "sociology": ["sociology", "sosyoloji"],
     }
     terms = [question.strip()]
     for eng, variants in keyword_map.items():
@@ -76,7 +85,7 @@ def api_chat(request):
             results = KnowledgeBase.objects.all().order_by('-scraped_at')[:5]
 
         context = '\n\n'.join([
-            f"Source: {r.title}\n{r.content[:2000]}"
+            f"Source: {r.title}\n{r.content[:3000]}"
             for r in results
         ])
 
@@ -85,11 +94,12 @@ def api_chat(request):
 
         prompt = f"""You are the Acibadem University Academic Assistant.
 
-STRICT RULES:
-- Use ONLY the provided TEXT to answer.
-- DO NOT use phrases like "Based on the text" or "In other words".
-- Maximum 2 short sentences.
-- If the answer is not in the TEXT, say: "I am sorry, I could not find specific information about this."
+RULES:
+- Answer using ONLY the TEXT provided below.
+- When listing departments or options, include the COMPLETE list exactly as written in the TEXT.
+- Do NOT summarize or shorten any list.
+- Do NOT add information not in the TEXT.
+- If not found, say: "I am sorry, I could not find specific information about this."
 - Answer in the same language as the QUESTION.
 
 TEXT:
@@ -98,7 +108,7 @@ TEXT:
 QUESTION:
 {question}
 
-ANSWER:"""
+ANSWER (include complete lists):"""
 
         response = requests.post(
             f"{settings.OLLAMA_URL}/api/generate",
@@ -109,7 +119,7 @@ ANSWER:"""
                 "options": {
                     "temperature": 0.1,
                     "top_p": 0.9,
-                    "num_predict": 100
+                    "num_predict": 400
                 }
             },
             timeout=120
