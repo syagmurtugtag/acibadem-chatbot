@@ -11,6 +11,7 @@ from PyPDF2 import PdfReader
 from bs4 import BeautifulSoup
 
 from .models import KnowledgeBase, ChatMessage, Conversation
+from scraper.site_crawler import AcibademSiteCrawler, crawl_default_acu_sources
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +103,28 @@ class PasteTextForm(forms.Form):
     )
 
 
+class CrawlSiteForm(forms.Form):
+    start_url = forms.URLField(
+        label="Start URL",
+        initial="https://www.acibadem.edu.tr/",
+        help_text="Crawler will stay inside the acibadem.edu.tr domain and follow HTML/PDF links."
+    )
+    max_pages = forms.IntegerField(
+        min_value=1,
+        max_value=100,
+        initial=20,
+        label="Max HTML pages",
+        help_text="Safety limit for how many HTML pages to visit in one crawl."
+    )
+    max_pdfs = forms.IntegerField(
+        min_value=0,
+        max_value=50,
+        initial=10,
+        label="Max PDFs",
+        help_text="Safety limit for how many PDF files to parse in one crawl."
+    )
+
+
 # ---------------------------------------------------------------------------
 # KnowledgeBase Admin
 # ---------------------------------------------------------------------------
@@ -118,6 +141,8 @@ class KnowledgeBaseAdmin(admin.ModelAdmin):
         custom_urls = [
             path('upload-pdf/', self.admin_site.admin_view(self.upload_pdf_view), name='kb_upload_pdf'),
             path('scrape-url/', self.admin_site.admin_view(self.scrape_url_view), name='kb_scrape_url'),
+            path('crawl-site/', self.admin_site.admin_view(self.crawl_site_view), name='kb_crawl_site'),
+            path('import-default-sources/', self.admin_site.admin_view(self.import_default_sources_view), name='kb_import_default_sources'),
             path('paste-text/', self.admin_site.admin_view(self.paste_text_view), name='kb_paste_text'),
         ]
         return custom_urls + urls
@@ -256,6 +281,83 @@ class KnowledgeBaseAdmin(admin.ModelAdmin):
             ),
         }
         return render(request, 'admin/kb_form.html', context)
+
+    # --- View 4: Site Crawl ---
+    def crawl_site_view(self, request):
+        if request.method == 'POST':
+            form = CrawlSiteForm(request.POST)
+            if form.is_valid():
+                start_url = form.cleaned_data['start_url']
+                max_pages = form.cleaned_data['max_pages']
+                max_pdfs = form.cleaned_data['max_pdfs']
+
+                if 'acibadem.edu.tr' not in start_url.lower():
+                    messages.error(request, 'Only acibadem.edu.tr URLs are allowed for crawling.')
+                    return redirect('..')
+
+                crawler = AcibademSiteCrawler(
+                    start_url,
+                    max_pages=max_pages,
+                    max_pdfs=max_pdfs,
+                )
+
+                try:
+                    stats = crawler.crawl()
+                    messages.success(
+                        request,
+                        (
+                            f'Crawl finished. Saved {stats.html_saved} HTML pages and '
+                            f'{stats.pdf_saved} PDFs. Visited {stats.html_visited} HTML pages and '
+                            f'{stats.pdf_visited} PDFs.'
+                        )
+                    )
+                    if stats.failed:
+                        messages.warning(request, f'{stats.failed} URLs could not be processed.')
+                    return redirect('../')
+                except Exception as e:
+                    messages.error(request, f'Failed to crawl site: {str(e)}')
+                    return redirect('..')
+        else:
+            form = CrawlSiteForm()
+
+        context = {
+            **self.admin_site.each_context(request),
+            'form': form,
+            'title': 'Crawl Acibadem Website into Knowledge Base',
+            'action_description': (
+                'Start from one Acibadem URL, follow only acibadem.edu.tr links, '
+                'and automatically import relevant HTML and PDF content into the knowledge base.'
+            ),
+        }
+        return render(request, 'admin/kb_form.html', context)
+
+    def import_default_sources_view(self, request):
+        if request.method == 'POST':
+            try:
+                stats = crawl_default_acu_sources()
+                messages.success(
+                    request,
+                    (
+                        f'Default ACU import finished. Saved {stats.html_saved} HTML pages and '
+                        f'{stats.pdf_saved} PDFs.'
+                    )
+                )
+                if stats.failed:
+                    messages.warning(request, f'{stats.failed} sources could not be processed.')
+                return redirect('../')
+            except Exception as e:
+                messages.error(request, f'Failed to import default sources: {str(e)}')
+                return redirect('../')
+
+        context = {
+            **self.admin_site.each_context(request),
+            'title': 'Import Recommended ACU Sources',
+            'action_description': (
+                'This will automatically crawl the built-in Acibadem student affairs, announcement, '
+                'English academic pages, and the main regulation PDF. No manual URL entry is required.'
+            ),
+        }
+        return render(request, 'admin/kb_confirm.html', context)
 
     # --- Helper display methods ---
     def short_url(self, obj):

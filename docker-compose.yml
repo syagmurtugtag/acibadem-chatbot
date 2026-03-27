@@ -22,10 +22,11 @@ services:
     networks:
       - chatbot_network
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      test: ["CMD-SHELL", "ollama list || exit 1"]
       interval: 10s
-      timeout: 5s
-      retries: 10
+      timeout: 10s
+      retries: 15
+      start_period: 30s
 
   ollama-init:
     image: ollama/ollama
@@ -51,6 +52,9 @@ services:
       OLLAMA_URL: http://ollama:11434
       SECRET_KEY: ${SECRET_KEY}
       DEBUG: "True"
+      AUTO_BOOTSTRAP_KB: "True"
+      KB_BOOTSTRAP_MAX_PAGES: "2"
+      KB_BOOTSTRAP_MAX_PDFS: "1"
     depends_on:
       db:
         condition: service_healthy

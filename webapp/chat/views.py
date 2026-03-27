@@ -81,6 +81,13 @@ OPTION_QUESTION_HINTS = [
     "pursue",
 ]
 
+TURKISH_HINTS = {
+    "ç", "ğ", "ı", "İ", "ö", "ş", "ü",
+    " nedir", " nasıl", " hangi", " bölüm", " fakülte", " öğrenci",
+    " başvuru", " şart", " koşul", " yandal", " çift anadal",
+    " var mı", " neler", " hakkında",
+}
+
 
 def chat_view(request):
     conversations = Conversation.objects.all().order_by("-created_at")[:20]
@@ -108,6 +115,62 @@ def normalize_text(text):
     text = text.replace("_", " ")
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def detect_question_language(question):
+    normalized = normalize_text(question)
+
+    if any(hint in question for hint in "çğıİöşüÇĞIİÖŞÜ"):
+        return "Turkish"
+
+    if any(hint in normalized for hint in TURKISH_HINTS):
+        return "Turkish"
+
+    return "English"
+
+
+def build_language_rule(question):
+    language = detect_question_language(question)
+    return (
+        f'- Respond in {language}.\n'
+        '- Use the same language as the QUESTION.\n'
+        '- If the source text is in another language, translate the answer into the QUESTION language.'
+    )
+
+
+def detect_answer_language(answer):
+    normalized = normalize_text(answer)
+
+    if any(ch in answer for ch in "çğıİöşüÇĞIİÖŞÜ"):
+        return "Turkish"
+
+    if any(hint in normalized for hint in TURKISH_HINTS):
+        return "Turkish"
+
+    return "English"
+
+
+def build_language_rewrite_prompt(question, answer):
+    language = detect_question_language(question)
+    return f"""You are the Acibadem University Academic Assistant.
+
+Rewrite the ANSWER so that it is in {language}.
+
+RULES:
+- Keep the meaning the same.
+- Keep the answer concise.
+- Use the same language as the QUESTION.
+- Do not add new facts.
+- Do not mention that you translated the answer.
+- If the original answer is exactly "{NOT_FOUND_MESSAGE}", translate that message into {language}.
+
+QUESTION:
+{question}
+
+ANSWER:
+{answer}
+
+REWRITTEN ANSWER:"""
 
 
 def detect_track(question):
@@ -444,6 +507,9 @@ def build_prompt(question, context):
 
 RULES:
 - Answer using ONLY the TEXT provided below.
+- {build_language_rule(question).splitlines()[0][2:]}
+- {build_language_rule(question).splitlines()[1][2:]}
+- {build_language_rule(question).splitlines()[2][2:]}
 - Do NOT add information that is not explicitly written in the TEXT.
 - If the TEXT contains an "Allowed Options" list, include EVERY option from that list.
 - Do NOT omit any option.
@@ -469,6 +535,9 @@ You previously omitted some options.
 
 RULES:
 - Answer using ONLY the TEXT provided below.
+- {build_language_rule(question).splitlines()[0][2:]}
+- {build_language_rule(question).splitlines()[1][2:]}
+- {build_language_rule(question).splitlines()[2][2:]}
 - Include EVERY option from the "Allowed Options" list exactly once.
 - Do NOT omit any option.
 - Do NOT summarize or shorten the list.
@@ -492,6 +561,9 @@ def build_yes_no_prompt(question, context, target_department):
 
 RULES:
 - Answer using ONLY the TEXT provided below.
+- {build_language_rule(question).splitlines()[0][2:]}
+- {build_language_rule(question).splitlines()[1][2:]}
+- {build_language_rule(question).splitlines()[2][2:]}
 - Start your answer with only one word: Yes or No.
 - Then write one short sentence.
 - Mention only the requested target program: {target_title}.
@@ -513,6 +585,9 @@ def build_definition_prompt(question, context):
 
 RULES:
 - Answer using ONLY the TEXT provided below.
+- {build_language_rule(question).splitlines()[0][2:]}
+- {build_language_rule(question).splitlines()[1][2:]}
+- {build_language_rule(question).splitlines()[2][2:]}
 - Do NOT list department options.
 - Do NOT list application options.
 - Do NOT add examples unless explicitly asked.
@@ -557,6 +632,20 @@ def call_llm(prompt):
     return answer.strip()
 
 
+def enforce_answer_language(question, answer):
+    if not answer:
+        return answer
+
+    question_language = detect_question_language(question)
+    answer_language = detect_answer_language(answer)
+
+    if question_language == answer_language:
+        return answer
+
+    rewritten = call_llm(build_language_rewrite_prompt(question, answer))
+    return rewritten or answer
+
+
 def option_present_in_answer(option, answer):
     option_norm = normalize_text(option)
     answer_norm = normalize_text(answer)
@@ -595,6 +684,7 @@ def api_chat(request):
             )
 
             answer = call_llm(build_definition_prompt(question, context))
+            answer = enforce_answer_language(question, answer)
 
             if not answer:
                 answer = NOT_FOUND_MESSAGE
@@ -631,6 +721,8 @@ def api_chat(request):
                     if missing_options:
                         answer = call_llm(build_revision_prompt(question, context, missing_options))
 
+            answer = enforce_answer_language(question, answer)
+
             if not answer:
                 answer = NOT_FOUND_MESSAGE
 
@@ -660,6 +752,7 @@ def api_chat(request):
             })
 
         answer = call_llm(build_prompt(question, context))
+        answer = enforce_answer_language(question, answer)
 
         if not answer:
             answer = NOT_FOUND_MESSAGE

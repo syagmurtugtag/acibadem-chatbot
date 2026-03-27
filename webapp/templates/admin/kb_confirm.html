@@ -1,0 +1,21 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+
+<div style="max-width: 760px;">
+  <div style="background:#e8f4fd; border-left:4px solid #1F4E79; padding:14px 18px; margin-bottom:24px; border-radius:4px;">
+    <strong>{{ title }}</strong><br>
+    <span style="color:#555; font-size:13px;">{{ action_description }}</span>
+  </div>
+
+  <form method="post">
+    {% csrf_token %}
+    <div style="margin-top:20px; display:flex; gap:12px; align-items:center;">
+      <input type="submit" value="Start Import"
+             style="background:#1F4E79; color:white; border:none; padding:10px 22px;
+                    border-radius:5px; cursor:pointer; font-size:14px; font-weight:bold;">
+      <a href="../" style="color:#666; font-size:13px;">Back to Knowledge Base</a>
+    </div>
+  </form>
+</div>
+
+{% endblock %}
