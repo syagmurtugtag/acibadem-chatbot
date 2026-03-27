@@ -1,4 +1,4 @@
-﻿import json
+import json
 import re
 import requests
 
@@ -676,7 +676,10 @@ def api_chat(request):
         })
 
     except requests.exceptions.ConnectionError:
-        return JsonResponse({"error": "LLM service is not running."}, status=503)
+        return JsonResponse({"error": "The AI service is currently unavailable. Please try again in a moment."}, status=503)
+
+    except requests.exceptions.Timeout:
+        return JsonResponse({"error": "The AI took too long to respond. Please try again."}, status=504)
 
     except Exception as e:
-        return JsonResponse({"error": f"System Error: {str(e)}"}, status=500)
+        return JsonResponse({"error": f"An unexpected error occurred. Please try again."}, status=500)

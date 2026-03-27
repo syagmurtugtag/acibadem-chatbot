@@ -9,13 +9,35 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - chatbot_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
-  llama:
+  ollama:
     image: ollama/ollama
     volumes:
       - ollama_data:/root/.ollama
     networks:
       - chatbot_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ollama-init:
+    image: ollama/ollama
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - chatbot_network
+    entrypoint: ["ollama", "pull", "llama3.2:3b"]
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    restart: "no"
 
   webapp:
     build: ./webapp
@@ -23,12 +45,17 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      OLLAMA_URL: http://llama:11434
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      OLLAMA_URL: http://ollama:11434
       SECRET_KEY: ${SECRET_KEY}
       DEBUG: "True"
     depends_on:
-      - db
-      - llama
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
     networks:
       - chatbot_network
 

@@ -1,0 +1,43 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+
+<div style="max-width: 800px;">
+
+  <div style="background:#e8f4fd; border-left:4px solid #1F4E79; padding:14px 18px; margin-bottom:24px; border-radius:4px;">
+    <strong>ℹ️ {{ title }}</strong><br>
+    <span style="color:#555; font-size:13px;">{{ action_description }}</span>
+  </div>
+
+  <form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+
+    <table>
+      {% for field in form %}
+      <tr>
+        <th style="padding:10px 12px; text-align:right; vertical-align:top; white-space:nowrap;">
+          <label for="{{ field.id_for_label }}">{{ field.label }}:</label>
+        </th>
+        <td style="padding:10px 12px;">
+          {{ field }}
+          {% if field.help_text %}
+            <p style="color:#888; font-size:12px; margin-top:4px;">{{ field.help_text }}</p>
+          {% endif %}
+          {% if field.errors %}
+            <p style="color:red; font-size:12px;">{{ field.errors }}</p>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    <div style="margin-top:20px; display:flex; gap:12px; align-items:center;">
+      <input type="submit" value="Save to Knowledge Base"
+             style="background:#1F4E79; color:white; border:none; padding:10px 22px;
+                    border-radius:5px; cursor:pointer; font-size:14px; font-weight:bold;">
+      <a href="../" style="color:#666; font-size:13px;">← Back to Knowledge Base</a>
+    </div>
+
+  </form>
+</div>
+
+{% endblock %}

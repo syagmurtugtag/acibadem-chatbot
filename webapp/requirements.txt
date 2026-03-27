@@ -4,3 +4,4 @@ requests==2.31.0
 beautifulsoup4==4.12.3
 python-decouple==3.8
 pypdf2==3.0.1
+gunicorn==21.2.0
