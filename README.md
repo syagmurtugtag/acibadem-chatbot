@@ -1,10 +1,10 @@
 # ACU AI Chatbot
 
-An AI-powered chatbot for Acibadem University, focused on **Double Major** and **Minor** program information.
+An AI-powered chatbot for Acibadem University, focused on Double Major and Minor program information.
 
-Built with **Django**, **PostgreSQL**, and **Ollama (Llama 3.2 3B)** — fully containerized with **Docker Compose**.
+Built with Django, PostgreSQL, and Ollama (Llama 3.2 3B), fully containerized with Docker and Docker Compose.
 
-> CSE 322 – Cloud Computing | Spring 2026
+> CSE 322 - Cloud Computing | Spring 2026
 
 ---
 
@@ -17,110 +17,257 @@ Built with **Django**, **PostgreSQL**, and **Ollama (Llama 3.2 3B)** — fully c
 
 ---
 
-## ⚡ Quick Start (step by step)
+## Quick Start
 
-> **Requirements:** Docker Desktop must be installed and **running** before you begin.
-> Download: https://www.docker.com/products/docker-desktop/
+Requirements:
+- Docker Desktop must be installed and running
+- Internet connection is needed on the first run to download the model and fetch ACU sources
 
-### Step 1 — Clone the repository
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/syagmurtugtag/acibadem-chatbot.git
 cd acibadem-chatbot
 ```
 
-### Step 2 — Create the `.env` file
-
-> ⚠️ This step is **required**. Without it, the containers will not start.
+### 2. Create the `.env` file
 
 ```bash
 cp .env.example .env
 ```
 
-On Windows (Command Prompt):
+On Windows Command Prompt:
+
 ```cmd
 copy .env.example .env
 ```
 
-You do not need to edit `.env` — the default values work for local development.
+The default values are enough for local development.
 
-### Step 3 — Build and start all containers
+### 3. Start the full system
 
 ```bash
 docker compose up --build
 ```
 
-> **First run:** Docker will download the Llama 3.2 3B model (~2 GB). This can take **5–15 minutes** depending on your internet speed. Wait until you see:
-> ```
-> webapp  | Starting Gunicorn...
-> ```
+This is the main startup command for the project.
 
-### Step 4 — Load the knowledge base
+What happens on startup:
+- PostgreSQL starts
+- Ollama starts
+- the `llama3.2:3b` model is pulled automatically if it is missing
+- Django runs migrations and collects static files
+- if the knowledge base is empty, the app automatically imports recommended Acibadem University sources
+- the web app starts on port `8000`
 
-Open a **new terminal** in the same folder and run:
+### 4. Open the app
 
-```bash
-docker compose exec webapp python manage.py scrape
-```
-
-### Step 5 — Open the app
-
-- **Chatbot:** http://localhost:8000
-- **Admin panel:** http://localhost:8000/admin/
+- Chatbot: [http://localhost:8000](http://localhost:8000)
+- Admin panel: [http://localhost:8000/admin/](http://localhost:8000/admin/)
 
 To create an admin account:
+
 ```bash
 docker compose exec webapp python manage.py createsuperuser
 ```
 
 ---
 
-## 🛑 Common Issues
+## One-Command Startup
 
-**`http://localhost:8000` does not open / ERR_CONNECTION_REFUSED**
-- Make sure you ran `cp .env.example .env` (Step 2)
-- Wait for the line `Starting Gunicorn...` in the terminal before opening the browser
-- Check that Docker Desktop is running
+The assignment requires the project to be startable with a single `docker compose up` command.
 
-**Containers exit immediately**
-- You forgot to create `.env`. Run `cp .env.example .env` and try again.
+This repository now supports that flow:
 
-**Model download is stuck**
-- The first run downloads ~2 GB. Be patient. Do not stop the process.
+```bash
+docker compose up --build
+```
 
-**Port 8000 already in use**
-- Something else is running on port 8000. Stop it, or change the port in `docker-compose.yml` from `"8000:8000"` to e.g. `"8080:8000"` and open http://localhost:8080 instead.
+If the database is empty on first startup, the web app automatically bootstraps the knowledge base by importing recommended ACU pages and PDFs. This means the user does not need to run a separate scrape command during normal first-time setup.
+
+---
+
+## Knowledge Base Loading
+
+The chatbot answers questions using content collected from Acibadem University sources.
+
+There are three ways to load data:
+
+### A. Automatic bootstrap on first startup
+
+This happens automatically inside the `webapp` container when the knowledge base is empty.
+
+### B. Manual import of recommended ACU sources
+
+```bash
+docker compose exec webapp python manage.py scrape
+```
+
+This imports a built-in set of recommended Acibadem University pages and PDFs.
+
+### C. Crawl from a custom ACU page
+
+```bash
+docker compose exec webapp python manage.py scrape --start-url https://www.acibadem.edu.tr/
+```
+
+Only `acibadem.edu.tr` links are followed by the crawler.
+
+---
+
+## Admin Tools
+
+From the Django admin panel, the Knowledge Base section supports:
+
+- `Upload PDF`: import text from a PDF file
+- `Scrape URL`: import content from one page
+- `Crawl ACU Site`: crawl from a custom Acibadem URL
+- `Import Recommended ACU Sources`: one-click import of built-in ACU sources
+- `Paste Text (OBS)`: manually paste content from JavaScript-heavy pages such as OBS/Bologna pages
+
+This is useful because some public ACU sources are regular HTML pages, while others may need manual copy-paste if they are JavaScript-heavy.
+
+---
+
+## Useful Commands
+
+Start everything:
+
+```bash
+docker compose up --build
+```
+
+Start in background:
+
+```bash
+docker compose up -d --build
+```
+
+Stop containers:
+
+```bash
+docker compose down
+```
+
+View logs:
+
+```bash
+docker compose logs -f
+```
+
+View only web app logs:
+
+```bash
+docker compose logs -f webapp
+```
+
+Import recommended ACU sources manually:
+
+```bash
+docker compose exec webapp python manage.py scrape
+```
+
+Create admin user:
+
+```bash
+docker compose exec webapp python manage.py createsuperuser
+```
 
 ---
 
 ## System Architecture
 
-```
-┌─────────────────────────────────────────────────────┐
-│                  Docker Network                      │
-│                                                     │
-│  ┌──────────┐    ┌──────────────┐    ┌───────────┐  │
-│  │ PostgreSQL│    │   Django /   │    │  Ollama   │  │
-│  │   :5432   │◄──►│   Gunicorn   │───►│  :11434   │  │
-│  │           │    │    :8000     │    │ llama3.2  │  │
-│  └──────────┘    └──────────────┘    └───────────┘  │
-│                         ▲                           │
-└─────────────────────────┼───────────────────────────┘
-                          │ HTTP
-                     Browser / User
+Containers:
+- `db`: PostgreSQL 15 database for knowledge base content, chat history, and application data
+- `ollama`: local LLM service
+- `ollama-init`: pulls the `llama3.2:3b` model if needed
+- `webapp`: Django application served by Gunicorn
+
+Typical flow:
+1. User asks a question in the web interface.
+2. Django retrieves relevant knowledge base content.
+3. Django sends context plus question to the local Ollama model.
+4. The model generates an answer.
+5. The answer and conversation are stored in PostgreSQL.
+
+---
+
+## Features
+
+- Chat interface for university-related questions
+- Conversation history stored in PostgreSQL
+- Django admin panel for knowledge base and chat logs
+- REST API endpoint at `POST /api/chat/`
+- Local LLM integration through Ollama
+- Prompt customization for more grounded answers
+- Domain-limited ACU crawler for public website content
+- Automatic knowledge base bootstrap on first startup
+
+---
+
+## Project Structure
+
+```text
+acibadem-chatbot/
+|-- docker-compose.yml
+|-- .env.example
+|-- README.md
+`-- webapp/
+    |-- Dockerfile
+    |-- entrypoint.sh
+    |-- manage.py
+    |-- requirements.txt
+    |-- config/
+    |   |-- settings.py
+    |   |-- urls.py
+    |   `-- wsgi.py
+    |-- chat/
+    |   |-- admin.py
+    |   |-- models.py
+    |   |-- urls.py
+    |   `-- views.py
+    |-- scraper/
+    |   |-- site_crawler.py
+    |   `-- management/commands/scrape.py
+    `-- templates/
 ```
 
-**Containers:**
-- `db` — PostgreSQL 15: stores knowledge base, chat history, conversations
-- `ollama` — Ollama server running Llama 3.2 3B locally (no external API calls)
-- `ollama-init` — one-time service that pulls the model automatically on first run
-- `webapp` — Django application served by Gunicorn
+---
 
-**Startup order:**
-1. `db` starts and becomes healthy
-2. `ollama` starts and becomes healthy
-3. `ollama-init` pulls `llama3.2:3b` if not already cached
-4. `webapp` runs migrations and starts Gunicorn
+## API Reference
+
+### POST `/api/chat/`
+
+Request:
+
+```json
+{
+  "question": "Which departments can Computer Engineering students apply to for a double major?",
+  "conversation_id": null
+}
+```
+
+Response:
+
+```json
+{
+  "answer": "Computer Engineering students can apply for a Double Major in Biomedical Engineering, Molecular Biology and Genetics, Psychology, Sociology, and Health Management.",
+  "conversation_id": 1
+}
+```
+
+### GET `/api/conversation/<id>/`
+
+Returns one conversation together with its stored messages.
+
+---
+
+## Current Limitations
+
+- Answer quality is still being improved
+- Some pages may require manual copy-paste because they are JavaScript-heavy
+- First startup can take time because of model download and initial source import
+- The chatbot is currently strongest on double major, minor, and related academic information
 
 ---
 
@@ -131,55 +278,7 @@ docker compose exec webapp python manage.py createsuperuser
 | Web Framework | Django 4.2 |
 | Database | PostgreSQL 15 |
 | LLM | Llama 3.2 3B via Ollama |
-| Containerization | Docker & Docker Compose |
+| Containerization | Docker and Docker Compose |
 | Web Server | Gunicorn |
-| Scraping | requests + BeautifulSoup + PyPDF2 |
+| Scraping | requests, BeautifulSoup, PyPDF2 |
 
----
-
-## Features
-
-- **Chat interface** — ask questions about double major and minor programs
-- **Conversation history** — past conversations saved and accessible from the sidebar
-- **Smart question routing** — definition, option-list, and yes/no questions handled with separate prompt strategies
-- **Local LLM** — Llama 3.2 3B runs entirely on your machine; no data sent to external APIs
-- **Admin panel** — manage knowledge base entries, view conversations and chat logs
-- **Knowledge base tools** — upload PDFs, scrape URLs, or paste text directly from the admin panel
-- **REST API** — `POST /api/chat/` endpoint
-
----
-
-## Project Structure
-
-```
-acibadem-chatbot/
-├── docker-compose.yml
-├── .env.example              ← copy this to .env before running
-├── README.md
-└── webapp/
-    ├── Dockerfile
-    ├── entrypoint.sh         # waits for DB, runs migrations, starts Gunicorn
-    ├── requirements.txt
-    ├── manage.py
-    ├── config/               # Django settings, URLs, WSGI
-    ├── chat/                 # models, views, admin, templates
-    └── scraper/              # management command: python manage.py scrape
-```
-
----
-
-## API Reference
-
-### POST `/api/chat/`
-
-```json
-// Request
-{ "question": "Which departments can Computer Engineering students apply to for a double major?", "conversation_id": null }
-
-// Response
-{ "answer": "Computer Engineering students can apply for a Double Major in: Biomedical Engineering, Molecular Biology and Genetics, Psychology, Sociology, and Health Management.", "conversation_id": 1 }
-```
-
-### GET `/api/conversation/<id>/`
-
-Returns a conversation with all its messages.
