@@ -44,6 +44,10 @@ copy .env.example .env
 
 The default values are enough for local development.
 
+Note:
+- `.env.example` is intended for local development and classroom demos
+- for production, replace the default database password and `SECRET_KEY`
+
 ### 3. Start the full system
 
 ```bash
@@ -281,4 +285,3 @@ Returns one conversation together with its stored messages.
 | Containerization | Docker and Docker Compose |
 | Web Server | Gunicorn |
 | Scraping | requests, BeautifulSoup, PyPDF2 |
-
