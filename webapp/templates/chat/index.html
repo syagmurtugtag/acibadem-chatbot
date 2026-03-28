@@ -92,18 +92,41 @@
     <script>
         let currentConversationId = null;
 
+        function createMessage(role, text, options = {}) {
+            const message = document.createElement('div');
+            message.className = `message ${role}`;
+
+            const bubble = document.createElement('span');
+            bubble.className = 'bubble';
+
+            if (options.html) {
+                bubble.innerHTML = text;
+            } else {
+                bubble.textContent = text;
+            }
+
+            if (options.style) {
+                bubble.style.cssText = options.style;
+            }
+
+            if (options.id) {
+                message.id = options.id;
+            }
+
+            message.appendChild(bubble);
+            return message;
+        }
+
         function startNewChat() {
             currentConversationId = null;
             document.querySelectorAll('.history-item').forEach(i => i.classList.remove('active'));
             const chatBox = document.getElementById('chatBox');
-            chatBox.innerHTML = `
-                <div class="message bot">
-                    <span class="bubble">
-                        Welcome! I am the <b>Acibadem University Academic Assistant</b>.<br><br>
-                        I can provide specific information about <b>Double Major</b> and <b>Minor</b> programs.<br><br>
-                        What would you like to learn today?
-                    </span>
-                </div>`;
+            chatBox.innerHTML = '';
+            chatBox.appendChild(createMessage(
+                'bot',
+                'Welcome! I am the <b>Acibadem University Academic Assistant</b>.<br><br>I can provide specific information about <b>Double Major</b> and <b>Minor</b> programs.<br><br>What would you like to learn today?',
+                { html: true }
+            ));
         }
 
         function loadConversation(convId, title) {
@@ -115,16 +138,15 @@
                 const item = document.getElementById('conv-' + convId);
                 if (item) item.classList.add('active');
                 const chatBox = document.getElementById('chatBox');
-                chatBox.innerHTML = `
-                    <div class="message bot">
-                        <span class="bubble" style="background:#eee;color:#666;font-size:11px;border:1px dashed #ccc;">
-                            📜 Viewing Past Conversation: ${title}
-                        </span>
-                    </div>`;
+                chatBox.innerHTML = '';
+                chatBox.appendChild(createMessage(
+                    'bot',
+                    `📜 Viewing Past Conversation: ${title}`,
+                    { style: 'background:#eee;color:#666;font-size:11px;border:1px dashed #ccc;' }
+                ));
                 data.messages.forEach(msg => {
-                    chatBox.innerHTML += `
-                        <div class="message user"><span class="bubble">${msg.question}</span></div>
-                        <div class="message bot"><span class="bubble">${msg.answer}</span></div>`;
+                    chatBox.appendChild(createMessage('user', msg.question));
+                    chatBox.appendChild(createMessage('bot', msg.answer));
                 });
                 chatBox.scrollTop = chatBox.scrollHeight;
             });
@@ -138,10 +160,10 @@
             const chatBox = document.getElementById('chatBox');
             const btn = document.getElementById('sendBtn');
 
-            chatBox.innerHTML += `<div class="message user"><span class="bubble">${question}</span></div>`;
+            chatBox.appendChild(createMessage('user', question));
             input.value = '';
             btn.disabled = true;
-            chatBox.innerHTML += `<div class="message bot" id="loading"><span class="bubble">...</span></div>`;
+            chatBox.appendChild(createMessage('bot', '...', { id: 'loading' }));
             chatBox.scrollTop = chatBox.scrollHeight;
 
             fetch('/api/chat/', {
@@ -172,7 +194,7 @@
                 }
 
                 const answer = data.answer || data.error || 'No response received.';
-                chatBox.innerHTML += `<div class="message bot"><span class="bubble">${answer}</span></div>`;
+                chatBox.appendChild(createMessage('bot', answer));
                 chatBox.scrollTop = chatBox.scrollHeight;
                 btn.disabled = false;
             })

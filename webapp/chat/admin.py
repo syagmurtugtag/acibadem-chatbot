@@ -147,6 +147,11 @@ class KnowledgeBaseAdmin(admin.ModelAdmin):
         ]
         return custom_urls + urls
 
+    def upsert_knowledge_record(self, *, title, topic, content, url=''):
+        lookup = {'url': url} if url and url != 'manual-entry' else {'title': title}
+        defaults = {'title': title, 'content': content, 'topic': topic, 'url': url}
+        KnowledgeBase.objects.update_or_create(defaults=defaults, **lookup)
+
     # --- View 1: PDF Upload ---
     def upload_pdf_view(self, request):
         if request.method == 'POST':
@@ -170,13 +175,11 @@ class KnowledgeBaseAdmin(admin.ModelAdmin):
 
                     content = '\n\n'.join(pages_text)[:8000]  # limit to 8000 chars
 
-                    KnowledgeBase.objects.update_or_create(
+                    self.upsert_knowledge_record(
                         title=title,
-                        defaults={
-                            'url': f'pdf://{pdf_file.name}',
-                            'content': content,
-                            'topic': topic,
-                        }
+                        topic=topic,
+                        content=content,
+                        url=f'pdf://{pdf_file.name}',
                     )
                     messages.success(
                         request,
@@ -225,9 +228,11 @@ class KnowledgeBaseAdmin(admin.ModelAdmin):
                             'Try the "Paste Text" option instead.'
                         )
 
-                    KnowledgeBase.objects.update_or_create(
+                    self.upsert_knowledge_record(
+                        title=title,
+                        topic=topic,
+                        content=content,
                         url=url,
-                        defaults={'title': title, 'content': content, 'topic': topic}
                     )
                     messages.success(request, f'Successfully scraped "{title}" ({len(content)} characters).')
                     return redirect('../')
@@ -262,9 +267,11 @@ class KnowledgeBaseAdmin(admin.ModelAdmin):
                 topic = form.cleaned_data['topic']
                 content = form.cleaned_data['content'].strip()
 
-                KnowledgeBase.objects.update_or_create(
+                self.upsert_knowledge_record(
                     title=title,
-                    defaults={'url': url, 'content': content[:8000], 'topic': topic}
+                    topic=topic,
+                    content=content[:8000],
+                    url=url,
                 )
                 messages.success(request, f'Successfully saved "{title}" ({len(content)} characters).')
                 return redirect('../')
