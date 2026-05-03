@@ -1262,10 +1262,37 @@ def extract_department_head_from_text(text):
 
 
 def clean_person_name(name):
+    name = (name or "").strip()
+    for stop in [
+        " Tarihçe",
+        " Acıbadem",
+        " Sor Cevaplayalım",
+        " Bölüm",
+        " Program",
+        " Hakkında",
+    ]:
+        name = name.split(stop, 1)[0].strip(" .")
+
     parts = []
     title_parts = {"Prof.", "Doç.", "Dr.", "Öğr.", "Üyesi", "Gör."}
+    stop_tokens = {
+        "acibadem",
+        "bolum",
+        "cevaplayalim",
+        "derece",
+        "hakkinda",
+        "kabul",
+        "kosullari",
+        "program",
+        "sor",
+        "tarihce",
+    }
 
-    for part in " ".join((name or "").split()).strip(" .").split():
+    for part in " ".join(name.split()).strip(" .").split():
+        folded_part = ascii_fold(part.strip(" .,:;()[]"))
+        if folded_part in stop_tokens:
+            break
+
         if part in title_parts:
             parts.append(part)
         elif len(part) > 2 and part.isupper():
@@ -2513,6 +2540,7 @@ def clean_response_text(answer):
         "ÅŸ": "ş",
         "Å": "Ş",
         "AyrÄ±ca": "Ayrıca",
+        " diplo ma ": " diploma ",
         " dipl oma ": " diploma ",
         " programın da ": " programında ",
         " ge çiş ": " geçiş ",
@@ -2533,6 +2561,7 @@ def clean_response_text(answer):
 
 def shorten_requirement_clause(clause):
     clause = clean_response_text(clause).strip(" .")
+    clause = re.sub(r"^\*+\s*", "", clause)
     clause = re.sub(r"^(?:Öğrencinin|Öğrenciler,|Öğrenci,)\s+", "", clause)
     clause = clause[:1].upper() + clause[1:] if clause else clause
     return clause
@@ -2582,14 +2611,14 @@ def format_general_answer(answer):
         return cleaned
 
     if " bölüm başkanı " in cleaned.lower() or "department head" in cleaned.lower():
-        return "Yanıt:\n- " + cleaned.strip(" .") + "."
+        return "- " + cleaned.strip(" .") + "."
 
     sentences = split_answer_sentences(cleaned)
     if not sentences:
         return cleaned
 
     if len(sentences) == 1:
-        return "Yanıt:\n- " + sentences[0].strip(" .") + "."
+        return "- " + sentences[0].strip(" .") + "."
 
     heading = sentences[0].strip(" .")
     bullets = [sentence.strip(" .") for sentence in sentences[1:4] if sentence.strip()]
@@ -2861,7 +2890,7 @@ def api_chat(request):
                 # New official sources came in — retry once.
                 direct_answer = answer_faculty_question_directly(question)
             if direct_answer:
-                answer = generate_grounded_answer(question, direct_answer, direct_answer)
+                answer = format_answer_for_display(question, direct_answer)
                 ChatMessage.objects.create(
                     conversation=conversation,
                     question=question,
@@ -2905,7 +2934,7 @@ def api_chat(request):
         if not structured_curriculum_answer and is_curriculum_question(question) and _lazy_ensure_sources():
             structured_curriculum_answer = answer_curriculum_from_official_record(question)
         if structured_curriculum_answer:
-            answer = generate_grounded_answer(question, structured_curriculum_answer, structured_curriculum_answer)
+            answer = format_answer_for_display(question, structured_curriculum_answer)
             ChatMessage.objects.create(
                 conversation=conversation,
                 question=question,
@@ -2921,7 +2950,7 @@ def api_chat(request):
         if not application_requirements_answer and is_application_requirements_question(question) and _lazy_ensure_sources():
             application_requirements_answer = answer_application_requirements_from_regulation(question)
         if application_requirements_answer:
-            answer = generate_grounded_answer(question, application_requirements_answer, application_requirements_answer)
+            answer = format_answer_for_display(question, application_requirements_answer)
             ChatMessage.objects.create(
                 conversation=conversation,
                 question=question,
@@ -2937,7 +2966,7 @@ def api_chat(request):
         if not structured_option_answer and detect_track(question) and is_option_question(question) and _lazy_ensure_sources():
             structured_option_answer = answer_program_options_from_official_table(question)
         if structured_option_answer:
-            answer = generate_grounded_answer(question, structured_option_answer, structured_option_answer)
+            answer = format_answer_for_display(question, structured_option_answer)
             ChatMessage.objects.create(
                 conversation=conversation,
                 question=question,
