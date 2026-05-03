@@ -28,6 +28,7 @@
         .message.user { align-items: flex-end; }
         .message.bot { align-items: flex-start; }
         .bubble { max-width: 85%; padding: 12px 18px; border-radius: 15px; font-size: 15px; line-height: 1.5; }
+        .bubble.formatted { white-space: pre-wrap; }
         .user .bubble { background: var(--acu-blue); color: white; border-bottom-right-radius: 2px; }
         .bot .bubble { background: #f1f1f1; color: #333; border-bottom-left-radius: 2px; border: 1px solid #e5e5e5; }
         .input-container { padding: 20px 20% 40px 20%; }
@@ -71,11 +72,7 @@
             </header>
             <div class="chat-box" id="chatBox">
                 <div class="message bot">
-                    <span class="bubble">
-                        Welcome! I am the <b>Acibadem University Academic Assistant</b>.<br><br>
-                        I can provide specific information about <b>Double Major</b> and <b>Minor</b> programs, application requirements, and regulations.<br><br>
-                        What would you like to learn today?
-                    </span>
+                    <span class="bubble">Welcome! I am the <b>Acibadem University Academic Assistant</b>.<br><br>I can provide specific information about <b>Double Major</b> and <b>Minor</b> programs, application requirements, and regulations.<br><br>What would you like to learn today?</span>
                 </div>
             </div>
             <div class="input-container">
@@ -103,6 +100,7 @@
                 bubble.innerHTML = text;
             } else {
                 bubble.textContent = text;
+                bubble.classList.add('formatted');
             }
 
             if (options.style) {

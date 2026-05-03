@@ -36,10 +36,33 @@ if [ "$AUTO_BOOTSTRAP_KB" = "True" ]; then
   KB_COUNT=$(python manage.py shell -c "from chat.models import KnowledgeBase; print(KnowledgeBase.objects.count())")
 
   if [ "$KB_COUNT" = "0" ]; then
-    echo "Knowledge base is empty. Importing recommended ACU sources..."
-    python manage.py scrape --max-pages "$KB_BOOTSTRAP_MAX_PAGES" --max-pdfs "$KB_BOOTSTRAP_MAX_PDFS"
+    echo "Knowledge base is empty. Importing recommended ACU sources in BACKGROUND..."
+    echo "(Web app will start serving immediately; KB will fill up over the next few minutes.)"
+    echo "Tail the scrape log with:  docker compose exec webapp tail -f /tmp/scrape.log"
+    nohup python manage.py scrape \
+        --max-pages "$KB_BOOTSTRAP_MAX_PAGES" \
+        --max-pdfs "$KB_BOOTSTRAP_MAX_PDFS" \
+        > /tmp/scrape.log 2>&1 &
   else
     echo "Knowledge base already contains data. Skipping bootstrap import."
+  fi
+
+  echo "Generating missing embeddings in BACKGROUND..."
+  nohup python manage.py generate_embeddings > /tmp/embeddings.log 2>&1 &
+
+  # OBS Bologna scrape — runs Playwright headless Chromium to fetch the
+  # authoritative course curricula. Only triggered when the KB does not
+  # already contain any *Playwright-sourced* OBS records (recognised by the
+  # title suffix written in obs_crawler.py). This way a previous static
+  # crawl that only wrote stub OBS rows does not block the proper scrape.
+  OBS_KB_COUNT=$(python manage.py shell -c "from chat.models import KnowledgeBase; print(KnowledgeBase.objects.filter(url__contains='obs.acibadem.edu.tr', title__contains='(OBS)').count())")
+
+  if [ "$OBS_KB_COUNT" = "0" ]; then
+    echo "No proper OBS Bologna records yet. Running browser-based OBS scrape in BACKGROUND..."
+    echo "Tail it with:  docker compose exec webapp tail -f /tmp/scrape_obs.log"
+    nohup python manage.py scrape_obs > /tmp/scrape_obs.log 2>&1 &
+  else
+    echo "Playwright OBS records already present ($OBS_KB_COUNT). Skipping OBS scrape."
   fi
 fi
 

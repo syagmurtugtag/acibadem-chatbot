@@ -1,7 +1,10 @@
 django==4.2.9
 psycopg2-binary==2.9.9
+pgvector==0.2.5
 requests==2.31.0
 beautifulsoup4==4.12.3
 python-decouple==3.8
 pypdf2==3.0.1
+pdfplumber==0.11.4
 gunicorn==21.2.0
+playwright==1.46.0

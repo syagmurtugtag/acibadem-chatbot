@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -35,7 +35,7 @@ services:
         condition: service_healthy
     networks:
       - chatbot_network
-    entrypoint: ["ollama", "pull", "llama3.2:3b"]
+    entrypoint: ["sh", "-c", "ollama pull llama3.2:3b && ollama pull nomic-embed-text"]
     environment:
       - OLLAMA_HOST=http://ollama:11434
     restart: "no"
@@ -53,8 +53,13 @@ services:
       SECRET_KEY: ${SECRET_KEY}
       DEBUG: "True"
       AUTO_BOOTSTRAP_KB: "True"
-      KB_BOOTSTRAP_MAX_PAGES: "2"
-      KB_BOOTSTRAP_MAX_PDFS: "1"
+      # Per-source crawl limits. Each entry in DEFAULT_ACU_SOURCE_URLS is used
+      # as a BFS starting point; the crawler will follow on-domain links from
+      # there up to MAX_PAGES HTML pages and MAX_PDFS PDFs. Higher values =
+      # better coverage of department / curriculum / faculty pages, but slower
+      # first startup.
+      KB_BOOTSTRAP_MAX_PAGES: "12"
+      KB_BOOTSTRAP_MAX_PDFS: "5"
     depends_on:
       db:
         condition: service_healthy
@@ -64,6 +69,12 @@ services:
         condition: service_completed_successfully
     networks:
       - chatbot_network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/', timeout=5).read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
 volumes:
   postgres_data:

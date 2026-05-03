@@ -1,34 +1,9 @@
 from django.core.management.base import BaseCommand
 
-from chat.models import KnowledgeBase
 from scraper.site_crawler import AcibademSiteCrawler, crawl_default_acu_sources
 
 
 DEFAULT_START_URL = "https://www.acibadem.edu.tr/"
-
-SEED_DATA = [
-    {
-        "url": "https://www.acibadem.edu.tr/en/double-major",
-        "title": "What is Double Major",
-        "topic": "double_major",
-        "content": (
-            "Double Major is a program at Acibadem University that allows students who meet the "
-            "eligibility requirements to pursue a second undergraduate degree alongside their "
-            "primary program."
-        ),
-    },
-    {
-        "url": "https://www.acibadem.edu.tr/en/minor",
-        "title": "What is Minor",
-        "topic": "minor",
-        "content": (
-            "Minor is a supplementary academic program at Acibadem University that allows students "
-            "to gain formal recognition in a secondary field of study without pursuing a full "
-            "second degree."
-        ),
-    },
-]
-
 
 class Command(BaseCommand):
     help = "Crawl the Acibadem University website and import relevant HTML/PDF content."
@@ -51,17 +26,11 @@ class Command(BaseCommand):
             default=10,
             help="Maximum number of PDFs to parse.",
         )
-        parser.add_argument(
-            "--load-seed-data",
-            action="store_true",
-            help="Also load the small built-in English seed records after crawling.",
-        )
 
     def handle(self, *args, **options):
         start_url = options["start_url"]
         max_pages = options["max_pages"]
         max_pdfs = options["max_pdfs"]
-        load_seed_data = options["load_seed_data"]
 
         if start_url:
             self.stdout.write(f"Starting crawl from: {start_url}")
@@ -91,16 +60,3 @@ class Command(BaseCommand):
 
         if stats.failed:
             self.stdout.write(self.style.WARNING(f"{stats.failed} URLs could not be processed."))
-
-        if load_seed_data:
-            self.stdout.write("Loading optional seed data...")
-            for entry in SEED_DATA:
-                KnowledgeBase.objects.update_or_create(
-                    url=entry["url"],
-                    defaults={
-                        "title": entry["title"],
-                        "content": entry["content"],
-                        "topic": entry["topic"],
-                    },
-                )
-            self.stdout.write(self.style.SUCCESS("Seed data loaded."))

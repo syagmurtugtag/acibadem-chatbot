@@ -1,4 +1,5 @@
 from django.db import models
+from pgvector.django import VectorField
 
 
 class KnowledgeBase(models.Model):
@@ -7,6 +8,7 @@ class KnowledgeBase(models.Model):
     content = models.TextField()
     topic = models.CharField(max_length=100, default='general')
     pdf_file = models.FileField(upload_to='knowledge_pdfs/', null=True, blank=True)
+    embedding = VectorField(dimensions=768, null=True, blank=True)
     scraped_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
