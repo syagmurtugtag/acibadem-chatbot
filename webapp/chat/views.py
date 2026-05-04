@@ -984,7 +984,7 @@ def semantic_ngrams(text, min_n=3, max_n=5, max_grams=1200):
 
 def build_query_search_text(question):
     analysis = analyze_query(question)
-    additions = []
+
 
     additions.extend(analysis["keywords"])
     additions.extend(get_department_slug_candidates(question))
