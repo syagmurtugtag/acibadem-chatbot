@@ -675,10 +675,10 @@ def analyze_query(question):
         intent = "curriculum"
     elif is_application_requirements_question(question):
         intent = "application_requirements"
-    elif track:
-        intent = "program_options"
     elif is_definition_question(question):
         intent = "definition"
+    elif track:
+        intent = "program_options"
     else:
         intent = "general"
 
@@ -897,6 +897,8 @@ def is_yes_no_option_question(question):
 
 def is_definition_question(question):
     q = normalize_text(question)
+    folded = ascii_fold(question)
+    has_track = detect_track(question) is not None
 
     definition_patterns = [
         "what is minor",
@@ -907,7 +909,20 @@ def is_definition_question(question):
         "define double major",
     ]
 
-    return any(pattern in q for pattern in definition_patterns)
+    turkish_definition_hints = [
+        "nedir",
+        "ne demek",
+        "ne anlama gelir",
+        "tanimi nedir",
+        "tanımı nedir",
+        "aciklar misin",
+        "açıklar mısın",
+    ]
+
+    return (
+        any(pattern in q for pattern in definition_patterns)
+        or (has_track and any(hint in q or hint in folded for hint in turkish_definition_hints))
+    )
 
 
 def extract_keywords(question):
@@ -972,6 +987,11 @@ def build_query_search_text(question):
         additions.extend(["program listesi", "basvurabilir", analysis["track"] or ""])
     elif analysis["intent"] == "application_requirements":
         additions.extend(["basvuru kabul kayit kosullari yonerge genel not ortalamasi kontenjan"])
+    elif analysis["intent"] == "definition":
+        if analysis["track"] == "double major":
+            additions.extend(["cift anadal programi cap tanimlar madde 4 ikinci diploma"])
+        elif analysis["track"] == "minor":
+            additions.extend(["yandal programi tanimlar madde 4 sertifika"])
 
     return " ".join([question, *[item for item in additions if item]])
 
@@ -2620,6 +2640,28 @@ def extract_options_from_pdf_table(url, question, track):
     return list(dict.fromkeys(option for option in options if option))
 
 
+def extract_all_target_programs_from_pdf_table(url, track):
+    programs = []
+
+    try:
+        for table in get_pdf_tables(url):
+            header_index, _source_col, target_col = find_program_table_columns(table, track)
+
+            if header_index is None or target_col is None:
+                continue
+
+            for row in table[header_index + 1:]:
+                if not row or target_col >= len(row):
+                    continue
+
+                target = row[target_col] or ""
+                programs.extend(split_program_options(target))
+    except Exception:
+        return []
+
+    return list(dict.fromkeys(simplify_program_option(program) for program in programs if program))
+
+
 def extract_reverse_options_from_pdf_table(url, question, track):
     source_programs = []
     department_names = get_department_search_names(question)
@@ -2687,6 +2729,66 @@ def should_include_reverse_program_options(question):
     ])
 
 
+def sort_program_list_records(records, question):
+    folded_question = ascii_fold(question)
+
+    def score(record):
+        title_url = ascii_fold(f"{record.title} {record.url}")
+        value = 0
+        if "program-listesi" in title_url:
+            value += 20
+        if "yonerge" in title_url:
+            value -= 20
+        if "onlisans" in title_url:
+            value += 8 if "onlisans" in folded_question else -3
+        if "lisans" in title_url and "onlisans" not in title_url:
+            value += 8 if "onlisans" not in folded_question else -3
+        return value
+
+    return sorted(records, key=score, reverse=True)
+
+
+def answer_general_program_options_from_official_table(question, records, track):
+    if detect_department(question) or extract_department_phrase(question):
+        return ""
+
+    q = ascii_fold(question)
+    general_hints = [
+        "hangi bolumler",
+        "hangi programlar",
+        "bolumler var",
+        "programlar var",
+        "cap yapilabilecek",
+        "cift anadal yapilabilecek",
+        "yandal yapilabilecek",
+        "available programs",
+        "available departments",
+    ]
+    if not any(hint in q for hint in general_hints):
+        return ""
+
+    for record in sort_program_list_records(records, question):
+        programs = extract_all_target_programs_from_pdf_table(record.url, track)
+        if not programs:
+            continue
+
+        if detect_question_language(question) == "Turkish":
+            track_label = "ÇAP" if track == "double major" else "yandal"
+            scope = "önlisans" if "onlisans" in ascii_fold(record.url) else "lisans"
+            return (
+                f"Resmi {scope} {track_label} program listesine göre {track_label} yapılabilecek programlar şunlardır:\n"
+                + "\n".join(f"- {program}" for program in programs)
+            )
+
+        track_label = "double major" if track == "double major" else "minor"
+        return (
+            f"According to the official {track_label} program list, the available target programs are:\n"
+            + "\n".join(f"- {program}" for program in programs)
+        )
+
+    return ""
+
+
 def answer_program_options_from_official_table(question):
     # Content-driven extraction: we only need a track and a department in the
     # question. No intent hint list — if the user mentions "yandal" + a
@@ -2706,7 +2808,11 @@ def answer_program_options_from_official_table(question):
         )
     ]
 
-    for record in records:
+    general_answer = answer_general_program_options_from_official_table(question, records, track)
+    if general_answer:
+        return general_answer
+
+    for record in sort_program_list_records(records, question):
         options = extract_options_from_pdf_table(record.url, question, track)
         if not options:
             continue
@@ -2989,6 +3095,47 @@ def find_definition_record(question):
             best_record = record
 
     return best_record
+
+
+def extract_program_definition_from_regulation(question):
+    track = detect_track(question)
+    if track not in {"double major", "minor"}:
+        return ""
+
+    record = find_program_regulation_record(question)
+    if not record or not record.content:
+        return ""
+
+    content = clean_regulation_clause(record.content)
+
+    if track == "double major":
+        pattern = (
+            r"Çift\s+Anadal\s+Programı\s*\(ÇAP\)\s*:\s*"
+            r"(?P<definition>.*?iki\s+ayrı\s+diploma\s+alabilmesini\s+sağlayan\s+program\s*ı)"
+        )
+        heading = "ÇAP (Çift Anadal Programı)"
+    else:
+        pattern = (
+            r"Yandal\s+Programı\s*:\s*"
+            r"(?P<definition>.*?programı\s+ifade\s+eder)"
+        )
+        heading = "Yandal Programı"
+
+    match = re.search(pattern, content, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+
+    definition = clean_regulation_clause(match.group("definition"))
+    definition = re.sub(r"\s+program\s*ı$", " programı", definition, flags=re.IGNORECASE)
+    definition = re.sub(r"\s+ifade\s+eder\.?$", "", definition, flags=re.IGNORECASE).strip(" .")
+
+    if not definition:
+        return ""
+
+    return (
+        f"{heading} resmi yönergede şöyle tanımlanır:\n"
+        f"- {definition}."
+    )
 
 
 def build_structured_context_from_record(record):
@@ -3769,6 +3916,11 @@ _BYPASS_RULES = (
     # 2) Program options — "which departments can X students do double major / minor with?"
     (
         ("cap yapabilir", "çap yapabilir", "yandal yapabilir",
+         "cap yapilabilecek", "çap yapılabilecek",
+         "cift anadal yapilabilecek", "çift anadal yapılabilecek",
+         "yandal yapilabilecek", "yandal yapılabilecek",
+         "hangi bolumler var", "hangi bölümler var",
+         "hangi programlar var",
          "double major", "minor program", "minor with",
          "hangi programlarla", "hangi bolumlerle", "hangi bölümlerle",
          "hangi programlara", "hangi bölümlere", "hangi bolumlere",
@@ -4015,6 +4167,11 @@ def collect_structured_evidence(question):
     )
 
     # 2. Definition: "what is double major / minor"
+    _add(
+        "Program definition (official regulation definition clause)",
+        extract_program_definition_from_regulation(question),
+    )
+
     def_record = find_definition_record(question)
     if def_record and def_record.content:
         snippet = def_record.content[:1500].strip()
