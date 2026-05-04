@@ -35,9 +35,10 @@ services:
         condition: service_healthy
     networks:
       - chatbot_network
-    entrypoint: ["sh", "-c", "ollama pull llama3.2:3b && ollama pull nomic-embed-text"]
+    entrypoint: ["sh", "-c", "ollama pull ${OLLAMA_CHAT_MODEL:-llama3.2:3b} && ollama pull nomic-embed-text"]
     environment:
       - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_CHAT_MODEL=${OLLAMA_CHAT_MODEL:-llama3.2:3b}
     restart: "no"
 
   webapp:
@@ -50,6 +51,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       OLLAMA_URL: http://ollama:11434
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-llama3.2:3b}
       SECRET_KEY: ${SECRET_KEY}
       DEBUG: "True"
       AUTO_BOOTSTRAP_KB: "True"

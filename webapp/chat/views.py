@@ -3,6 +3,7 @@ import math
 import re
 import requests
 import unicodedata
+from difflib import SequenceMatcher
 
 from django.shortcuts import render
 from django.http import JsonResponse
@@ -103,6 +104,32 @@ FACULTY_QUESTION_HINTS = [
     "faculty members",
 ]
 
+ACADEMIC_ROLE_QUESTION_HINTS = [
+    "dekan",
+    "dekanı",
+    "dekani",
+    "dean",
+    "dekan yardımcısı",
+    "dekan yardimcisi",
+    "dean assistant",
+    "vice dean",
+    "fakülte sekreteri",
+    "fakulte sekreteri",
+    "faculty secretary",
+]
+
+FACULTY_DEPARTMENT_LIST_HINTS = [
+    "kaç bölüm",
+    "kac bolum",
+    "hangi bölümler",
+    "hangi bolumler",
+    "bölümleri nelerdir",
+    "bolumleri nelerdir",
+    "departments",
+    "how many departments",
+    "which departments",
+]
+
 CURRICULUM_QUESTION_HINTS = [
     "compulsory course",
     "compulsory courses",
@@ -140,6 +167,15 @@ CURRICULUM_QUESTION_HINTS = [
     "güz dönemi dersleri",
     "bahar donemi dersleri",
     "bahar dönemi dersleri",
+]
+
+COMMON_COURSE_HINTS = [
+    "ortak",
+    "common",
+    "both",
+    "same course",
+    "aynı ders",
+    "ayni ders",
 ]
 
 DEPARTMENT_TITLE_MAP = {
@@ -404,6 +440,22 @@ def detect_track(question):
     return None
 
 
+# =============================================================================
+# Question-type classifiers — RETRIEVAL HINTS ONLY, NOT DISPATCH
+# =============================================================================
+# The functions below (is_faculty_question, is_curriculum_question, etc.) used
+# to act as dispatch gates: "if is_curriculum_question, run the curriculum
+# extractor". That broke for any phrasing the keyword lists didn't anticipate
+# (e.g. "CSE kodlu dersler nelerdir" — no list match, no extractor fired).
+#
+# As of the 2026 refactor, dispatch happens through `collect_structured_evidence`
+# which runs every extractor unconditionally. The classifiers below are kept
+# only as RETRIEVAL RANKING SIGNALS used inside `get_passage_boost` — when we
+# know the question is curriculum-flavoured, we boost OBS curriculum pages in
+# the RAG result list. If a new phrasing isn't matched, no boost is applied,
+# but the question STILL gets answered through the extractor + vector RAG path.
+
+
 def is_faculty_question(question):
     q = normalize_text(question)
     has_dept = detect_department(question) is not None or bool(extract_department_phrase(question))
@@ -412,11 +464,46 @@ def is_faculty_question(question):
     return has_dept and has_hint
 
 
+def detect_academic_role(question):
+    folded = ascii_fold(question)
+    if any(term in folded for term in ["dekan yardimcisi", "dekan yrd", "vice dean", "dean assistant"]):
+        return "vice_dean"
+    if any(term in folded for term in ["fakulte sekreteri", "faculty secretary"]):
+        return "faculty_secretary"
+    if any(term in folded for term in ["dekan", "dean"]):
+        return "dean"
+    return None
+
+
+def is_academic_role_question(question):
+    folded = ascii_fold(question)
+    has_role = detect_academic_role(question) is not None
+    asks_person = any(hint in folded for hint in ["kim", "who", "adi", "ismi", "name"])
+    has_unit = any(term in folded for term in ["fakulte", "faculty", "enstitu", "school", "yuksekokul"])
+    return has_role and (asks_person or has_unit)
+
+
+def is_faculty_department_list_question(question):
+    folded = ascii_fold(question)
+    has_faculty = "fakulte" in folded or "faculty" in folded
+    has_department_list_hint = any(ascii_fold(hint) in folded for hint in FACULTY_DEPARTMENT_LIST_HINTS)
+    return has_faculty and has_department_list_hint
+
+
 def is_curriculum_question(question):
     q = normalize_text(question)
     has_dept = detect_department(question) is not None
     has_hint = any(hint in q for hint in CURRICULUM_QUESTION_HINTS)
     return has_dept and has_hint
+
+
+def is_common_course_question(question):
+    q = normalize_text(question)
+    folded = ascii_fold(question)
+    has_two_departments = len(get_department_mentions(question)) >= 2
+    has_common_hint = any(hint in q or hint in folded for hint in COMMON_COURSE_HINTS)
+    has_course_hint = any(hint in q for hint in CURRICULUM_QUESTION_HINTS)
+    return has_two_departments and has_common_hint and has_course_hint
 
 
 def ascii_fold(text):
@@ -569,7 +656,11 @@ def analyze_query(question):
     folded = ascii_fold(question)
     track = detect_track(question)
 
-    if is_faculty_question(question):
+    if is_faculty_department_list_question(question):
+        intent = "faculty_departments"
+    elif is_academic_role_question(question):
+        intent = "academic_role"
+    elif is_faculty_question(question):
         intent = "faculty"
     elif is_curriculum_question(question):
         intent = "curriculum"
@@ -617,6 +708,10 @@ def get_query_slug_candidates(analysis):
 
     if analysis["intent"] == "faculty":
         candidates.extend(["bolum-baskaninin-mesaji", "akademik-kadro", "department-head"])
+    elif analysis["intent"] == "academic_role":
+        candidates.extend(["yonetim", "yönetim", "dekan", "dekanlik", "dekanlık", "fakulte", "fakülte"])
+    elif analysis["intent"] == "faculty_departments":
+        candidates.extend(["fakulte", "fakülte", "bolumler", "bölümler", "lisans"])
 
     return list(dict.fromkeys(slugify_text(candidate) for candidate in candidates if candidate))
 
@@ -640,6 +735,18 @@ def score_candidate_source_url(url, analysis, slug_candidates):
             score += 12
         if "akademik-kadro" in folded_url:
             score += 8
+    elif intent == "academic_role":
+        if any(hint in folded_url for hint in ["yonetim", "yönetim", "dekan", "dekanlik", "dekanlık"]):
+            score += 18
+        if any(hint in folded_url for hint in ["akademik-kadro", "bolum-baskaninin-mesaji", "ders", "mufredat"]):
+            score -= 10
+    elif intent == "faculty_departments":
+        if folded_url.rstrip("/").endswith("fakultesi") or "/fakultesi/" not in folded_url:
+            score += 4
+        if "bolumler" in folded_url or "bölümler" in folded_url:
+            score += 8
+        if any(hint in folded_url for hint in ["akademik-kadro", "yonetim", "dekanlik", "ders", "mufredat", "komisyon"]):
+            score -= 8
     elif intent == "curriculum":
         if any(hint in folded_url for hint in ["ders", "mufredat", "curriculum", "course", "bologna"]):
             score += 10
@@ -846,6 +953,10 @@ def build_query_search_text(question):
 
     if analysis["intent"] == "faculty":
         additions.extend(["bolum baskani", "department head", "akademik kadro"])
+    elif analysis["intent"] == "academic_role":
+        additions.extend(["yonetim", "dekan", "dekanlik", "fakulte yonetimi"])
+    elif analysis["intent"] == "faculty_departments":
+        additions.extend(["fakulte bolumler lisans programlari"])
     elif analysis["intent"] == "curriculum":
         additions.extend(["dersler", "ders plani", "curriculum", "zorunlu", "secmeli"])
     elif analysis["intent"] == "program_options":
@@ -972,6 +1083,14 @@ def get_passage_boost(question, passage):
             boost += 1.0
         if "bölüm başkanı" in text or "bolum baskani" in text or "department head" in text:
             boost += 0.5
+
+    if is_academic_role_question(question):
+        if topic == "management" or "yonetim" in url or "yönetim" in title:
+            boost += 4.0
+        if any(role_hint in text for role_hint in ["dekan", "dekanlık", "dekanlik", "dean"]):
+            boost += 2.0
+        if any(bad_hint in url for bad_hint in ["akademik-kadro", "bolum-baskaninin-mesaji", "ders", "mufredat"]):
+            boost -= 2.0
 
     track = detect_track(question)
     if track == "double major":
@@ -1280,9 +1399,11 @@ def clean_person_name(name):
         "bolum",
         "cevaplayalim",
         "derece",
+        "fakulte",
         "hakkinda",
         "kabul",
         "kosullari",
+        "kurulu",
         "program",
         "sor",
         "tarihce",
@@ -1369,6 +1490,293 @@ def extract_department_head_near_department(text, question):
                         key=lambda item: abs(item.start() - department_position),
                     )
                     return clean_person_name(closest.group(0))
+
+    return ""
+
+
+def extract_unit_tokens_for_role_question(question):
+    folded = ascii_fold(question)
+    folded = re.sub(
+        r"\b(?:kimdir|kim|who|is|the|of|adi|ismi|nedir|dekan[ia]?|dean|yardimcisi|yrd|fakulte sekreteri|faculty secretary)\b",
+        " ",
+        folded,
+    )
+    tokens = re.findall(r"[a-z0-9]+", folded)
+    ignored = {
+        "ve", "ile", "and", "bir", "bu", "su", "hangi", "acaba", "universitesi",
+        "acibadem", "nin", "nın", "nun", "nün", "in", "un", "de", "da",
+    }
+    return [
+        token for token in tokens
+        if len(token) > 2 and token not in ignored and token not in STOP_WORDS
+    ]
+
+
+def extract_unit_phrase_for_role_question(question):
+    cleaned = re.sub(
+        r"\b(?:dekan yardımcısı|dekan yardimcisi|fakülte sekreteri|fakulte sekreteri|dekanı|dekani|dekan|dean|kimdir|kim|who\s+is)\b",
+        " ",
+        question or "",
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ?.")
+
+    if not cleaned:
+        return ""
+
+    return cleaned[:1].upper() + cleaned[1:]
+
+
+def extract_faculty_unit_tokens(question):
+    folded = ascii_fold(question)
+    folded = re.sub(
+        r"\b(?:kac|kaç|hangi|bolum|bolumler|bolumleri|bölüm|bölümler|bölümleri|var|nelerdir|nedir|departments|how|many|which|are|there)\b",
+        " ",
+        folded,
+    )
+    tokens = re.findall(r"[a-z0-9]+", folded)
+    ignored = {"ve", "ile", "and", "bir", "bu", "su", "universitesi", "acibadem", "in", "de", "da"}
+    return [token for token in tokens if len(token) > 2 and token not in ignored and token not in STOP_WORDS]
+
+
+def record_matches_faculty_unit(record, question):
+    tokens = extract_faculty_unit_tokens(question)
+    if not tokens:
+        return False
+
+    folded = ascii_fold(f"{record.title} {record.url} {record.content}")
+    hits = sum(1 for token in tokens if token in folded)
+    return hits >= min(3, len(tokens))
+
+
+def extract_departments_from_faculty_record(content):
+    if not content:
+        return []
+
+    text = " ".join(content.split())
+    match = re.search(
+        r"Bölümler\s+(.+?)(?:\s+Eğitim Kurulu|\s+Araştırma|\s+Tanıtım|\s+Sanal Tur|\s+DEKANLIK|\s+Fakülte Hakkında|\s+Vizyon)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return []
+
+    section = match.group(1)
+    candidates = re.findall(
+        r"[A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü]+(?:\s+ve\s+[A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü]+)?(?:\s+[A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü]+)*\s+(?:Mühendisliği|Biyoloji ve Genetik|Bölümü)",
+        section,
+    )
+
+    departments = []
+    seen = set()
+    for candidate in candidates:
+        cleaned = clean_response_text(candidate).strip(" .")
+        folded = ascii_fold(cleaned)
+        if folded in seen:
+            continue
+        if any(bad in folded for bad in ["fakulte", "dekan", "yonetim", "akademik"]):
+            continue
+        seen.add(folded)
+        departments.append(cleaned)
+
+    return departments
+
+
+def faculty_base_url(url):
+    match = re.match(r"(.+/fakultesi)(?:/.*)?$", url or "")
+    return match.group(1) if match else (url or "").rstrip("/")
+
+
+def extract_departments_from_faculty_child_pages(base_url):
+    if not base_url:
+        return []
+
+    prefix = base_url.rstrip("/") + "/bolumler/"
+    departments = []
+    seen = set()
+
+    for record in KnowledgeBase.objects.filter(url__startswith=prefix):
+        suffix = (record.url or "")[len(prefix):].strip("/")
+        if not suffix or "/" in suffix:
+            continue
+
+        title = (record.title or "").split("|", 1)[0].strip()
+        folded_title = ascii_fold(title)
+        if not title or any(bad in folded_title for bad in ["akademik kadro", "bolum baskani", "komisyon", "hakkinda"]):
+            continue
+
+        key = ascii_fold(title)
+        if key in seen:
+            continue
+        seen.add(key)
+        departments.append(title)
+
+    return departments
+
+
+def answer_faculty_departments_question_directly(question):
+    # Content-driven: needs the question to mention a faculty (matched by
+    # record_matches_faculty_unit). No hint-list gate.
+    records = [
+        record for record in KnowledgeBase.objects.all()
+        if is_official_acu_source_url(record.url)
+        and record_matches_faculty_unit(record, question)
+    ]
+    if not records:
+        return ""
+
+    scored = []
+    for record in records:
+        folded = ascii_fold(f"{record.title} {record.topic} {record.url} {record.content}")
+        score = 0
+        if "/bolumler/" not in folded and folded.rstrip("/").endswith("fakultesi"):
+            score += 20
+        if "bolumler" in folded:
+            score += 8
+        if any(bad in folded for bad in ["akademik-kadro", "yonetim", "dekanlik", "komisyon"]):
+            score -= 6
+        scored.append((score, record))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    child_department_candidates = []
+    for _score, record in scored:
+        child_department_candidates.append(
+            extract_departments_from_faculty_child_pages(faculty_base_url(record.url))
+        )
+    best_child_departments = max(child_department_candidates, key=len, default=[])
+
+    for _score, record in scored:
+        departments = extract_departments_from_faculty_record(record.content)
+        if len(departments) <= 1:
+            child_departments = extract_departments_from_faculty_child_pages(faculty_base_url(record.url)) or best_child_departments
+            if child_departments:
+                departments = child_departments
+
+        if not departments:
+            continue
+
+        unit_name = extract_unit_phrase_for_role_question(question)
+        unit_name = re.sub(
+            r"\b(?:kaç|kac|hangi|bölüm|bolum|bölümler|bolumler|bölümleri|bolumleri|var|nelerdir)\b",
+            " ",
+            unit_name,
+            flags=re.IGNORECASE,
+        )
+        unit_name = re.sub(r"\s+", " ", unit_name).strip(" ?.")
+        unit_name = unit_name[:1].upper() + unit_name[1:] if unit_name else "İlgili fakülte"
+
+        if detect_question_language(question) == "Turkish":
+            return (
+                f"{unit_name} resmi sayfasında listelenen {len(departments)} bölüm vardır:\n"
+                + "\n".join(f"- {department}." for department in departments)
+            )
+
+        return (
+            f"The official page lists {len(departments)} departments in {unit_name}:\n"
+            + "\n".join(f"- {department}." for department in departments)
+        )
+
+    return ""
+
+
+def record_matches_role_unit(record, question):
+    tokens = extract_unit_tokens_for_role_question(question)
+    if not tokens:
+        return False
+
+    folded = ascii_fold(f"{record.title} {record.url} {record.content}")
+    hits = sum(1 for token in tokens if token in folded)
+    required = min(3, len(tokens))
+    return hits >= required
+
+
+def extract_person_for_academic_role(text, role):
+    if not text:
+        return ""
+
+    title_name_pattern = (
+        r"(?:Prof\.|Doç\.|Dr\. Öğr\. Üyesi|Dr\.|Öğr\. Gör\.)\s*"
+        r"(?:Dr\.\s*)?"
+        r"[A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü]+"
+        r"(?:\s+[A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü]+){1,4}"
+    )
+
+    if role == "dean":
+        role_patterns = [
+            rf"({title_name_pattern})\s+Dekan(?!\s*(?:Yrd|Yardımcısı|Yardimcisi))",
+            rf"DEKANLIK\s+({title_name_pattern})\s+Dekan",
+            rf"Dekan\s+({title_name_pattern})",
+        ]
+    elif role == "vice_dean":
+        role_patterns = [
+            rf"({title_name_pattern})\s+Dekan\s*(?:Yrd\.?|Yardımcısı|Yardimcisi)",
+            rf"Dekan\s*(?:Yrd\.?|Yardımcısı|Yardimcisi)\s+({title_name_pattern})",
+        ]
+    elif role == "faculty_secretary":
+        role_patterns = [
+            r"FAKÜLTE SEKRETERİ\s+([A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü]+(?:\s+[A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü]+){1,3})",
+            r"([A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü]+(?:\s+[A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü]+){1,3})\s+Fakülte Sekreteri",
+        ]
+    else:
+        return ""
+
+    for pattern in role_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return clean_person_name(match.group(1))
+
+    return ""
+
+
+def academic_role_label(role, language):
+    labels = {
+        "dean": ("dekanı", "dean"),
+        "vice_dean": ("dekan yardımcısı", "vice dean"),
+        "faculty_secretary": ("fakülte sekreteri", "faculty secretary"),
+    }
+    tr, en = labels.get(role, ("yetkilisi", "official"))
+    return tr if language == "Turkish" else en
+
+
+def answer_academic_role_question_directly(question):
+    role = detect_academic_role(question)
+    if not role:
+        return ""
+
+    records = [
+        record for record in KnowledgeBase.objects.all()
+        if is_official_acu_source_url(record.url)
+        and record_matches_role_unit(record, question)
+    ]
+
+    scored = []
+    for record in records:
+        folded = ascii_fold(f"{record.title} {record.topic} {record.url} {record.content}")
+        score = 0
+        if "yonetim" in folded or "management" in folded:
+            score += 20
+        if "dekan" in folded or "dean" in folded:
+            score += 8
+        if any(bad in folded for bad in ["akademik-kadro", "bolum-baskaninin-mesaji", "ders plani"]):
+            score -= 8
+        scored.append((score, record))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    for _score, record in scored:
+        person = extract_person_for_academic_role(record.content, role)
+        if not person:
+            continue
+
+        unit_name = extract_unit_phrase_for_role_question(question) or "İlgili birim"
+        language = detect_question_language(question)
+        label = academic_role_label(role, language)
+
+        if language == "Turkish":
+            return f"{unit_name} {label} {person}."
+        return f"The {label} is {person}."
 
     return ""
 
@@ -1571,6 +1979,62 @@ def record_matches_department(record, question):
     return False
 
 
+ORDINAL_WORDS = {
+    1: ["birinci", "ilk"],
+    2: ["ikinci"],
+    3: ["ucuncu"],
+    4: ["dorduncu"],
+    5: ["besinci"],
+    6: ["altinci"],
+    7: ["yedinci"],
+    8: ["sekizinci"],
+}
+
+
+def token_similarity(left, right):
+    return SequenceMatcher(None, left or "", right or "").ratio()
+
+
+def fuzzy_ordinal_value(token):
+    token = ascii_fold(token).strip(" .,:;()[]")
+    if not token:
+        return None
+
+    if token.isdigit():
+        number = int(token)
+        return number if 1 <= number <= 8 else None
+
+    for value, words in ORDINAL_WORDS.items():
+        for word in words:
+            if token == word or token.startswith(word):
+                return value
+            if len(token) >= 4 and token_similarity(token, word) >= 0.72:
+                return value
+
+    return None
+
+
+def extract_period_value_near_terms(question, period_terms):
+    folded = ascii_fold(question)
+    tokens = re.findall(r"[a-z0-9]+", folded)
+
+    for index, token in enumerate(tokens):
+        if not any(token.startswith(term) for term in period_terms):
+            continue
+
+        for candidate in reversed(tokens[max(0, index - 3):index]):
+            value = fuzzy_ordinal_value(candidate)
+            if value:
+                return value
+
+    return None
+
+
+def mentions_semester_scope(question):
+    folded = ascii_fold(question)
+    return any(term in folded for term in ["yariyil", "donem", "semester", "term"])
+
+
 def _detect_requested_semester(question):
     """Map a curriculum question to a specific semester number, or None.
 
@@ -1579,6 +2043,34 @@ def _detect_requested_semester(question):
     the extractor can return only the requested semester's compulsory list.
     """
     q = normalize_text(question)
+    folded = ascii_fold(question)
+
+    explicit_semester_patterns = [
+        (1, [
+            r"\b1\s*\.?\s*(?:yariyil|donem)\w*\b",
+            r"\b(?:birinci|ilk)\s+(?:yariyil|donem)\w*\b",
+            r"\bfirst\s+(?:semester|term)\b",
+        ]),
+        (2, [
+            r"\b2\s*\.?\s*(?:yariyil|donem)\w*\b",
+            r"\bikinci\s+(?:yariyil|donem)\w*\b",
+            r"\bsecond\s+(?:semester|term)\b",
+        ]),
+        (3, [r"\b3\s*\.?\s*(?:yariyil|donem)\w*\b", r"\bucuncu\s+(?:yariyil|donem)\w*\b"]),
+        (4, [r"\b4\s*\.?\s*(?:yariyil|donem)\w*\b", r"\bdorduncu\s+(?:yariyil|donem)\w*\b"]),
+        (5, [r"\b5\s*\.?\s*(?:yariyil|donem)\w*\b", r"\bbesinci\s+(?:yariyil|donem)\w*\b"]),
+        (6, [r"\b6\s*\.?\s*(?:yariyil|donem)\w*\b", r"\baltinci\s+(?:yariyil|donem)\w*\b"]),
+        (7, [r"\b7\s*\.?\s*(?:yariyil|donem)\w*\b", r"\byedinci\s+(?:yariyil|donem)\w*\b"]),
+        (8, [r"\b8\s*\.?\s*(?:yariyil|donem)\w*\b", r"\bsekizinci\s+(?:yariyil|donem)\w*\b"]),
+    ]
+
+    for semester, patterns in explicit_semester_patterns:
+        if any(re.search(pattern, folded) for pattern in patterns):
+            return semester
+
+    fuzzy_semester = extract_period_value_near_terms(question, ["yariyil", "donem", "semester", "term"])
+    if fuzzy_semester:
+        return fuzzy_semester
 
     if any(h in q for h in [
         "ilk donem", "ilk dönem", "1. donem", "1.donem", "1. dönem", "1.dönem",
@@ -1595,6 +2087,29 @@ def _detect_requested_semester(question):
         "2. yariyil", "2.yariyil", "2. yarıyıl", "2.yarıyıl",
     ]):
         return 2
+    return None
+
+
+def _detect_requested_semesters(question):
+    semester = _detect_requested_semester(question)
+    if semester:
+        return [semester]
+
+    q = normalize_text(question)
+    folded = ascii_fold(question)
+
+    year_patterns = [
+        (1, ["birinci sinif", "1. sinif", "1.sinif", "ilk sinif", "first year"]),
+        (2, ["ikinci sinif", "2. sinif", "2.sinif", "second year"]),
+        (3, ["ucuncu sinif", "üçüncü sınıf", "3. sinif", "3.sinif", "third year"]),
+        (4, ["dorduncu sinif", "dördüncü sınıf", "4. sinif", "4.sinif", "fourth year"]),
+    ]
+
+    for year, patterns in year_patterns:
+        if any(pattern in q or pattern in folded for pattern in patterns):
+            start = (year - 1) * 2 + 1
+            return [start, start + 1]
+
     return None
 
 
@@ -1650,12 +2165,109 @@ def _curriculum_record_priority(record):
     return score
 
 
-def answer_curriculum_from_official_record(question):
-    if not is_curriculum_question(question):
+def get_department_display_name_from_key(department, language="Turkish"):
+    if language == "Turkish":
+        return DEPARTMENT_TURKISH_TITLE_MAP.get(department, DEPARTMENT_TITLE_MAP.get(department, department))
+    return DEPARTMENT_TITLE_MAP.get(department, department)
+
+
+def get_curriculum_record_for_department(department):
+    records = [
+        record for record in KnowledgeBase.objects.all()
+        if is_official_acu_source_url(record.url)
+        and normalize_text(record.topic) == "curriculum"
+        and record_matches_department(record, department)
+    ]
+    records.sort(key=_curriculum_record_priority, reverse=True)
+    return records[0] if records else None
+
+
+def get_required_courses_for_department(department, semesters=None):
+    record = get_curriculum_record_for_department(department)
+    if not record:
+        return []
+
+    if not semesters:
+        return extract_required_courses_from_text(record.content)
+
+    courses = []
+    seen = set()
+    for semester in semesters:
+        for course in extract_required_courses_from_text(record.content, semester=semester):
+            code = course.split(" ", 2)
+            key = " ".join(code[:2]) if len(code) >= 2 else course
+            if key in seen:
+                continue
+            seen.add(key)
+            courses.append(course)
+    return courses
+
+
+def course_code(course):
+    match = re.match(r"([A-Z]{2,4}\s+\d{2,4})\b", course or "")
+    return match.group(1) if match else ""
+
+
+def answer_common_courses_from_official_records(question):
+    # Content-driven: this fires only when the question mentions at least
+    # two departments. No hint-list gate.
+    departments = get_department_mentions(question)[:2]
+    if len(departments) < 2:
         return ""
 
-    # We let any curriculum question through and rely on the extractor to find
-    # compulsory courses in the official record.
+    semesters = _detect_requested_semesters(question)
+    if semesters is None and mentions_semester_scope(question):
+        return "Soruda hangi yarıyıl/dönem istendiğini net anlayamadım. Lütfen örneğin \"3. yarıyıl\" veya \"üçüncü yarıyıl\" şeklinde yazın."
+
+    first_courses = get_required_courses_for_department(departments[0], semesters=semesters)
+    second_courses = get_required_courses_for_department(departments[1], semesters=semesters)
+    if not first_courses or not second_courses:
+        return ""
+
+    second_by_code = {course_code(course): course for course in second_courses if course_code(course)}
+    common_courses = [
+        course for course in first_courses
+        if course_code(course) and course_code(course) in second_by_code
+    ]
+
+    if not common_courses:
+        return NOT_FOUND_MESSAGE
+
+    language = detect_question_language(question)
+    first_name = get_department_display_name_from_key(departments[0], language)
+    second_name = get_department_display_name_from_key(departments[1], language)
+
+    if semesters == [1, 2]:
+        scope_tr = "birinci sınıfta"
+        scope_en = "in the first year"
+    elif semesters and len(semesters) == 1:
+        scope_tr = f"{semesters[0]}. yarıyılda"
+        scope_en = f"in semester {semesters[0]}"
+    elif semesters:
+        scope_tr = "istenen dönemde"
+        scope_en = "in the requested period"
+    else:
+        scope_tr = "müfredatta"
+        scope_en = "in the curriculum"
+
+    if language == "Turkish":
+        return (
+            f"Resmi OBS müfredat kayıtlarına göre {first_name} ile {second_name} için {scope_tr} ortak görünen zorunlu dersler:\n"
+            + "\n".join(f"- {course}." for course in common_courses)
+        )
+
+    return (
+        f"According to the official OBS curriculum records, the required courses common to {first_name} and {second_name} {scope_en} are:\n"
+        + "\n".join(f"- {course}." for course in common_courses)
+    )
+
+
+def answer_curriculum_from_official_record(question):
+    # NOTE: We deliberately do NOT gate on a hint list (e.g. "is this a
+    # curriculum question?"). The extractor is content-driven: if the
+    # question mentions a department AND the KB has a curriculum record
+    # for it, we extract courses. The LLM downstream decides whether the
+    # extracted evidence is relevant to the user's actual question.
 
     records = [
         record for record in KnowledgeBase.objects.all()
@@ -1669,6 +2281,8 @@ def answer_curriculum_from_official_record(question):
     records.sort(key=_curriculum_record_priority, reverse=True)
 
     semester = _detect_requested_semester(question)
+    if semester is None and mentions_semester_scope(question):
+        return "Soruda hangi yarıyıl/dönem istendiğini net anlayamadım. Lütfen örneğin \"3. yarıyıl\" veya \"üçüncü yarıyıl\" şeklinde yazın."
 
     for record in records:
         # OBS pages have explicit "<N>.Yarıyıl Ders Planı" sections; respect
@@ -1926,8 +2540,12 @@ def should_include_reverse_program_options(question):
 
 
 def answer_program_options_from_official_table(question):
+    # Content-driven extraction: we only need a track and a department in the
+    # question. No intent hint list — if the user mentions "yandal" + a
+    # department, we extract the matching options table; the LLM later
+    # decides whether to include them in the final answer.
     track = detect_track(question)
-    if not track or not is_option_question(question):
+    if not track:
         return ""
 
     records = [
@@ -2064,7 +2682,10 @@ def extract_requirement_clauses(section, track=None):
 
 
 def answer_application_requirements_from_regulation(question):
-    if not is_application_requirements_question(question):
+    # Content-driven: we only require that the question mentions a track
+    # (double major or minor). The function returns "" if no regulation
+    # record matches or no clauses were extracted; the LLM decides relevance.
+    if not detect_track(question):
         return ""
 
     record = find_program_regulation_record(question)
@@ -2119,13 +2740,11 @@ def score_option_record(record, department, track):
 
 
 def find_exact_option_record(question):
+    # Content-driven: track + department detection is enough; no hint-list gate.
     track = detect_track(question)
     source_department, _ = detect_source_and_target_departments(question)
 
     if not track or not source_department:
-        return None
-
-    if not is_option_question(question) and not is_yes_no_option_question(question):
         return None
 
     department_title = DEPARTMENT_TITLE_MAP[source_department].lower()
@@ -2491,30 +3110,27 @@ def compact_evidence_for_generation(evidence, max_chars=1800):
 def build_grounded_generation_prompt(question, evidence):
     return f"""You are the Acibadem University Academic Assistant.
 
-Use the EVIDENCE as retrieved facts from official Acibadem University sources.
+You will be given several EVIDENCE blocks. Each block is labelled with its
+KIND (e.g. "Department curriculum", "Department head"). Pick whichever
+block(s) contain the facts the QUESTION needs and use them. Ignore the
+unrelated blocks.
 
-STRICT RESPONSE TRANSFORMATION RULES:
+If the QUESTION asks for a subset of items in a block (e.g. "CSE kodlu
+dersler", "1. dönem dersleri", "ilk yarıyıl"), filter the items in that
+block and return only the matching ones.
+
+WRITING RULES:
 - {build_language_rule(question).splitlines()[0][2:]}
 - {build_language_rule(question).splitlines()[1][2:]}
 - {build_language_rule(question).splitlines()[2][2:]}
-- You MUST NOT copy-paste retrieved content directly.
-- Transform the retrieved information into a clear, structured, user-friendly answer.
-- ALWAYS rewrite the answer in your own words, except exact names, course codes, numbers, percentages, and program names.
-- ALWAYS structure the output using bullet points or short sections.
-- Break long sentences into shorter, readable items.
-- If the answer contains multiple conditions or requirements, group them under meaningful headings.
-- Keep the answer concise but explanatory.
-- Avoid long paragraphs.
-- Make the output easy to scan.
-- Keep every listed requirement, course, person name, number, and program option that appears in the EVIDENCE.
-- If the EVIDENCE has separate categories, keep those categories separate.
-- Do not add facts that are not in the EVIDENCE.
-- Do not add examples, services, programs, resources, or explanations that are not explicitly in the EVIDENCE.
-- Use clear labels when the answer has multiple groups, such as "Anadal öğrencileri için" and "Bu programa başvurabilenler".
-- Keep bullets short and readable. Do not dump long source text when a short restatement is enough.
-- Use at most 6 bullets unless the EVIDENCE itself requires a longer list.
-- Do not mention "retrieved", "evidence", "context", or "according to the text".
-- If the EVIDENCE does not answer the question, say exactly: "{NOT_FOUND_MESSAGE}"
+- Answer the QUESTION only. Do not add the chair name, the faculty
+  description, or other extra facts unless the user asked.
+- Do NOT include multiple sections separated by "---". One focused answer.
+- Keep course codes, person names, numbers and program names verbatim.
+- Use short bullets when listing items.
+- Do NOT mention "evidence", "block", "kind", "retrieved", or "context".
+- Only say "{NOT_FOUND_MESSAGE}" when truly no block contains the
+  requested fact (a partial match still counts — filter and answer).
 
 EVIDENCE:
 {evidence}
@@ -2601,6 +3217,25 @@ def format_requirement_answer(answer):
     return intro.strip() + "\n" + "\n".join(f"- {item}." for item in formatted_items if item)
 
 
+def format_curriculum_answer(answer):
+    cleaned = clean_response_text(answer)
+    marker = "zorunlu dersleri:"
+    if marker not in cleaned.lower():
+        return cleaned
+
+    heading, courses_text = cleaned.split(":", 1)
+    courses = [
+        course.strip(" .")
+        for course in courses_text.split(",")
+        if course.strip(" .")
+    ]
+
+    if not courses:
+        return cleaned
+
+    return heading.strip() + ":\n" + "\n".join(f"- {course}." for course in courses)
+
+
 def format_general_answer(answer):
     cleaned = clean_response_text(answer)
 
@@ -2609,6 +3244,20 @@ def format_general_answer(answer):
 
     if len(cleaned) < 40:
         return cleaned
+
+    role_markers = [
+        " dekanı ",
+        " dekani ",
+        " dekan yardımcısı ",
+        " dekan yardimcisi ",
+        " fakülte sekreteri ",
+        " fakulte sekreteri ",
+        " dean ",
+        " vice dean ",
+        " faculty secretary ",
+    ]
+    if any(marker in ascii_fold(f" {cleaned} ") for marker in [ascii_fold(item) for item in role_markers]):
+        return "- " + cleaned.strip(" .") + "."
 
     if " bölüm başkanı " in cleaned.lower() or "department head" in cleaned.lower():
         return "- " + cleaned.strip(" .") + "."
@@ -2660,6 +3309,74 @@ def answer_is_grounded(answer, evidence):
     return (len(unsupported) / max(len(answer_tokens), 1)) <= 0.25
 
 
+def extract_course_codes(text):
+    return set(re.findall(r"\b[A-Z]{2,4}\s+\d{2,4}\b", text or ""))
+
+
+def answer_preserves_course_codes(answer, evidence):
+    evidence_codes = extract_course_codes(evidence)
+    if not evidence_codes:
+        return True
+
+    answer_codes = extract_course_codes(answer)
+    return evidence_codes.issubset(answer_codes)
+
+
+def extract_titled_person_names(text):
+    pattern = (
+        r"(?:Prof\.|Doç\.|Dr\. Öğr\. Üyesi|Dr\.|Öğr\. Gör\.)\s*"
+        r"(?:Dr\.\s*)?"
+        r"[A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü]+"
+        r"(?:\s+[A-ZÇĞİÖŞÜ][A-Za-zÇĞİÖŞÜçğıöşü]+){1,4}"
+    )
+    return [clean_person_name(match.group(0)) for match in re.finditer(pattern, text or "")]
+
+
+def answer_preserves_person_names(answer, evidence):
+    names = extract_titled_person_names(evidence)
+    if not names:
+        return True
+
+    folded_answer = ascii_fold(answer)
+    for name in names:
+        name_tokens = [
+            token for token in re.findall(r"[a-z]+", ascii_fold(name))
+            if token not in {"prof", "doc", "dr", "ogr", "uyesi", "gor"}
+        ]
+        if name_tokens and all(token in folded_answer for token in name_tokens):
+            return True
+
+    return False
+
+
+def extract_bullet_items(text):
+    return [
+        line.strip(" -.•*")
+        for line in (text or "").splitlines()
+        if line.strip().startswith("- ")
+    ]
+
+
+def answer_preserves_bullet_items(answer, evidence):
+    items = extract_bullet_items(evidence)
+    if not items:
+        return True
+
+    if "\n-" not in (answer or ""):
+        return False
+
+    folded_answer = ascii_fold(answer)
+    for item in items:
+        tokens = [
+            token for token in re.findall(r"[a-z0-9]+", ascii_fold(item))
+            if len(token) > 3 and token not in STOP_WORDS
+        ]
+        if tokens and not all(token in folded_answer for token in tokens):
+            return False
+
+    return True
+
+
 def format_answer_for_display(question, answer):
     if not answer or answer.strip() == NOT_FOUND_MESSAGE:
         return answer
@@ -2667,6 +3384,7 @@ def format_answer_for_display(question, answer):
     formatted = clean_response_text(answer)
     formatted = format_program_options_answer(formatted)
     formatted = format_requirement_answer(formatted)
+    formatted = format_curriculum_answer(formatted)
     formatted = format_general_answer(formatted)
 
     return formatted
@@ -2682,7 +3400,7 @@ def generate_grounded_answer(question, evidence, fallback_answer):
         answer = call_llm(
             build_grounded_generation_prompt(question, compact_evidence),
             timeout=60,
-            num_predict=160,
+            num_predict=260,
         )
         answer = enforce_answer_language(question, answer)
     except Exception:
@@ -2708,6 +3426,15 @@ def generate_grounded_answer(question, evidence, fallback_answer):
         return format_answer_for_display(question, fallback_answer)
 
     if not answer_is_grounded(answer, evidence):
+        return format_answer_for_display(question, fallback_answer)
+
+    if not answer_preserves_course_codes(answer, evidence):
+        return format_answer_for_display(question, fallback_answer)
+
+    if not answer_preserves_person_names(answer, evidence):
+        return format_answer_for_display(question, fallback_answer)
+
+    if not answer_preserves_bullet_items(answer, evidence):
         return format_answer_for_display(question, fallback_answer)
 
     evidence_sentences = split_answer_sentences(evidence)
@@ -2780,9 +3507,10 @@ def call_llm(prompt, timeout=90, num_predict=220):
     response = requests.post(
         f"{settings.OLLAMA_URL}/api/generate",
         json={
-            "model": "llama3.2:3b",
+            "model": settings.OLLAMA_CHAT_MODEL,
             "prompt": prompt,
             "stream": False,
+            "keep_alive": "15m",
             "options": {
                 "temperature": 0.0,
                 "top_p": 0.9,
@@ -2834,8 +3562,165 @@ def option_present_in_answer(option, answer):
     return option_norm in answer_norm
 
 
+def collect_structured_evidence(question):
+    """Run every high-precision extractor and collect non-empty results.
+
+    Each extractor below is content-driven: it returns a non-empty string
+    only when the knowledge base contains a record that legitimately answers
+    the question (a curriculum page for the named department, a regulation
+    PDF for the named track, etc.). Extractors that don't apply silently
+    return "".
+
+    Why this lives in one place
+    ---------------------------
+    The previous architecture sprinkled intent-classifier checks throughout
+    api_chat: "is this a curriculum question?" → run curriculum extractor.
+    That broke for any phrasing the hint list didn't anticipate
+    (e.g. "CSE kodlu dersler nelerdir"). The new approach runs every
+    extractor unconditionally and lets the LLM (which sees the resulting
+    evidence + the original question) decide what is relevant.
+
+    Returns
+    -------
+    list[str]: zero or more strings, each one a self-contained piece of
+    high-precision evidence (a course list, a person's name, a list of
+    regulation clauses, etc.). The grounded LLM is given them all.
+    """
+    evidence = []
+
+    def _add(kind, body):
+        """Append a labelled evidence block. The label is what the LLM sees so
+        it can reason about whether this block is actually relevant to the
+        user's question.
+        """
+        if body:
+            evidence.append({"kind": kind, "body": body.strip()})
+
+    # 1. Curriculum: course list from an OBS / department curriculum page
+    _add(
+        "Department curriculum (compulsory course list)",
+        answer_curriculum_from_official_record(question),
+    )
+
+    # 2. Definition: "what is double major / minor"
+    def_record = find_definition_record(question)
+    if def_record and def_record.content:
+        snippet = def_record.content[:1500].strip()
+        _add(
+            "Program definition (e.g. what is double major / minor)",
+            f"{def_record.title}\n\n{snippet}",
+        )
+
+    # 3. Department head / faculty member
+    _add(
+        "Department head (chair of the named department)",
+        answer_faculty_question_directly(question),
+    )
+
+    # 4. Faculty → list of departments (if applicable)
+    try:
+        dept_list = answer_faculty_departments_question_directly(question)
+    except Exception:
+        dept_list = ""
+    _add(
+        "Faculty department list (departments inside a faculty)",
+        dept_list,
+    )
+
+    # 5. Academic role question (rector, dean, vice-dean, etc.)
+    try:
+        role_answer = answer_academic_role_question_directly(question)
+    except Exception:
+        role_answer = ""
+    _add(
+        "Academic role holder (dean / vice-dean / faculty secretary)",
+        role_answer,
+    )
+
+    # 6. Common courses across departments
+    try:
+        common_courses_answer = answer_common_courses_from_official_records(question)
+    except Exception:
+        common_courses_answer = ""
+    _add(
+        "Common courses (courses shared by two named departments)",
+        common_courses_answer,
+    )
+
+    # 7. Program options table (PDF) for double major / minor
+    _add(
+        "Program options table (double major / minor target departments)",
+        answer_program_options_from_official_table(question),
+    )
+
+    # 8. Application requirements from the official regulation PDF
+    _add(
+        "Application requirements (official regulation clauses)",
+        answer_application_requirements_from_regulation(question),
+    )
+
+    # 9. Direct option-record match (e.g. "Computer Engineering Double Major Options")
+    option_record = find_exact_option_record(question)
+    if option_record:
+        structured_context, _options = build_structured_context_from_record(option_record)
+        _add(
+            "Direct option-record match (department-specific options page)",
+            structured_context,
+        )
+
+    return evidence
+
+
+def format_evidence_for_prompt(evidence):
+    """Render labelled evidence blocks into a single string for the LLM prompt.
+
+    Each block becomes:
+
+        ── Evidence #N — <kind> ──
+        <body>
+
+    The numeric IDs and explicit kind labels make it easy for the model to
+    refer back to a specific piece — and to ignore the ones that don't
+    answer the user's question.
+    """
+    if not evidence:
+        return ""
+    parts = []
+    for index, block in enumerate(evidence, start=1):
+        if isinstance(block, dict):
+            kind = block.get("kind", "evidence")
+            body = block.get("body", "")
+        else:
+            # Backwards-compatibility for old plain-string evidence.
+            kind = "evidence"
+            body = str(block)
+        parts.append(f"── Evidence #{index} — {kind} ──\n{body}")
+    return "\n\n".join(parts)
+
+
 @csrf_exempt
 def api_chat(request):
+    """ACU chatbot endpoint.
+
+    Pipeline (rule-based dispatch removed in favour of a uniform RAG flow):
+
+        1. Vector RAG (pgvector + nomic-embed) finds the most relevant
+           knowledge-base passages for the question.
+        2. If retrieval is empty, fetch question-specific sources from the
+           live ACU site once and retry.
+        3. Run every high-precision structured extractor (curriculum, faculty,
+           regulation, options, …) on the content. Each extractor is
+           content-driven — it returns evidence only when its preconditions
+           (matching department, track, etc.) are satisfied.
+        4. The grounded LLM (Qwen) is given:
+              - all extractor evidence
+              - the RAG context as additional grounding
+           and produces the final answer in the question's language.
+
+    No "is this a curriculum question?" / "is this a faculty question?"
+    classifiers anywhere — that brittleness is gone. The LLM, given solid
+    grounded evidence, decides what to use.
+    """
     if request.method != "POST":
         return JsonResponse({"error": "Only POST allowed"}, status=405)
 
@@ -2855,23 +3740,14 @@ def api_chat(request):
         else:
             conversation = Conversation.objects.create(title=question[:50])
 
-        # NOTE: We deliberately do NOT call ensure_sources_for_question() at
-        # the top of the request anymore. That call can fetch up to 5 ACU
-        # pages per request, which adds 5–30 seconds to every chat request
-        # whenever the user asks something new.
-        #
-        # Instead we run the cheap path first (already-scraped data) and only
-        # reach for ensure_sources_for_question as a last-resort fallback when
-        # everything below failed to produce an answer.
+        # ------------------------------------------------------------------
+        # Helper: fetch fresh sources from acibadem.edu.tr at most once per
+        # request. Used as a fallback when the existing KB has no relevant
+        # records for the question.
+        # ------------------------------------------------------------------
         sources_already_ensured = False
 
         def _lazy_ensure_sources():
-            """Call ensure_sources_for_question at most once per request.
-
-            Returns True if any new source was actually crawled. We use the
-            return value to decide whether it is worth retrying retrieval
-            after the fetch.
-            """
             nonlocal sources_already_ensured
             if sources_already_ensured:
                 return False
@@ -2881,215 +3757,100 @@ def api_chat(request):
                 ensure_sources_for_question(question)
             except Exception:
                 return False
-            after = KnowledgeBase.objects.count()
-            return after > before
+            return KnowledgeBase.objects.count() > before
 
-        if is_faculty_question(question):
-            direct_answer = answer_faculty_question_directly(question)
-            if not direct_answer and _lazy_ensure_sources():
-                # New official sources came in — retry once.
-                direct_answer = answer_faculty_question_directly(question)
-            if direct_answer:
-                answer = format_answer_for_display(question, direct_answer)
-                ChatMessage.objects.create(
-                    conversation=conversation,
-                    question=question,
-                    answer=answer
-                )
-                return JsonResponse({
-                    "answer": answer,
-                    "conversation_id": conversation.id
-                })
-
-        definition_record = find_definition_record(question)
-
-        if definition_record:
-            context = (
-                f"Source: {definition_record.title}\n"
-                f"Topic: {definition_record.topic}\n"
-                f"URL: {definition_record.url}\n"
-                f"{definition_record.content}"
-            )
-
-            answer = call_llm(build_definition_prompt(question, context))
-            answer = enforce_answer_language(question, answer)
-
-            if not answer:
-                answer = NOT_FOUND_MESSAGE
-
-            answer = format_answer_for_display(question, answer)
-
-            ChatMessage.objects.create(
-                conversation=conversation,
-                question=question,
-                answer=answer
-            )
-
-            return JsonResponse({
-                "answer": answer,
-                "conversation_id": conversation.id
-            })
-
-        structured_curriculum_answer = answer_curriculum_from_official_record(question)
-        if not structured_curriculum_answer and is_curriculum_question(question) and _lazy_ensure_sources():
-            structured_curriculum_answer = answer_curriculum_from_official_record(question)
-        if structured_curriculum_answer:
-            answer = format_answer_for_display(question, structured_curriculum_answer)
-            ChatMessage.objects.create(
-                conversation=conversation,
-                question=question,
-                answer=answer
-            )
-
-            return JsonResponse({
-                "answer": answer,
-                "conversation_id": conversation.id
-            })
-
-        application_requirements_answer = answer_application_requirements_from_regulation(question)
-        if not application_requirements_answer and is_application_requirements_question(question) and _lazy_ensure_sources():
-            application_requirements_answer = answer_application_requirements_from_regulation(question)
-        if application_requirements_answer:
-            answer = format_answer_for_display(question, application_requirements_answer)
-            ChatMessage.objects.create(
-                conversation=conversation,
-                question=question,
-                answer=answer
-            )
-
-            return JsonResponse({
-                "answer": answer,
-                "conversation_id": conversation.id
-            })
-
-        structured_option_answer = answer_program_options_from_official_table(question)
-        if not structured_option_answer and detect_track(question) and is_option_question(question) and _lazy_ensure_sources():
-            structured_option_answer = answer_program_options_from_official_table(question)
-        if structured_option_answer:
-            answer = format_answer_for_display(question, structured_option_answer)
-            ChatMessage.objects.create(
-                conversation=conversation,
-                question=question,
-                answer=answer
-            )
-
-            return JsonResponse({
-                "answer": answer,
-                "conversation_id": conversation.id
-            })
-
-        exact_option_record = find_exact_option_record(question)
-
-        if exact_option_record:
-            context, expected_options = build_structured_context_from_record(exact_option_record)
-
-            source_department, target_department = detect_source_and_target_departments(question)
-
-            if is_yes_no_option_question(question) and target_department:
-                answer = call_llm(build_yes_no_prompt(question, context, target_department))
-            else:
-                answer = call_llm(build_prompt(question, context))
-
-                if expected_options:
-                    missing_options = [
-                        option for option in expected_options
-                        if not option_present_in_answer(option, answer)
-                    ]
-
-                    if missing_options:
-                        answer = call_llm(build_revision_prompt(question, context, missing_options))
-
-            answer = enforce_answer_language(question, answer)
-
-            if not answer:
-                answer = NOT_FOUND_MESSAGE
-
-            answer = format_answer_for_display(question, answer)
-
-            ChatMessage.objects.create(
-                conversation=conversation,
-                question=question,
-                answer=answer
-            )
-
-            return JsonResponse({
-                "answer": answer,
-                "conversation_id": conversation.id
-            })
-
-        if detect_track(question) and is_option_question(question):
-            ChatMessage.objects.create(
-                conversation=conversation,
-                question=question,
-                answer=NOT_FOUND_MESSAGE
-            )
-
-            return JsonResponse({
-                "answer": NOT_FOUND_MESSAGE,
-                "conversation_id": conversation.id
-            })
-
+        # ------------------------------------------------------------------
+        # 1. Vector RAG retrieval (with one lazy-ensure retry)
+        # ------------------------------------------------------------------
         context = get_rag_context(question)
-
-        # If retrieval came up empty, try fetching question-specific sources
-        # from the live ACU site exactly once and retry retrieval.
         if not context and _lazy_ensure_sources():
             context = get_rag_context(question)
 
-        if not context:
-            ChatMessage.objects.create(
-                conversation=conversation,
-                question=question,
-                answer=NOT_FOUND_MESSAGE
-            )
+        # ------------------------------------------------------------------
+        # 2. Structured evidence: every extractor runs unconditionally and
+        #    returns "" when its preconditions aren't met. We retry once
+        #    after fetching fresh sources if we got nothing.
+        # ------------------------------------------------------------------
+        evidence = collect_structured_evidence(question)
+        if not evidence and not sources_already_ensured and _lazy_ensure_sources():
+            evidence = collect_structured_evidence(question)
+            if not context:
+                context = get_rag_context(question)
 
-            return JsonResponse({
-                "answer": NOT_FOUND_MESSAGE,
-                "conversation_id": conversation.id
-            })
-
-        if is_broad_info_question(question):
-            extractive_answer = build_extractive_answer(question, context)
-            if extractive_answer:
-                answer = generate_grounded_answer(question, extractive_answer, extractive_answer)
-                ChatMessage.objects.create(
-                    conversation=conversation,
-                    question=question,
-                    answer=answer
-                )
-
-                return JsonResponse({
-                    "answer": answer,
-                    "conversation_id": conversation.id
-                })
-
-        # Pick the prompt template based on what the question is actually asking.
-        # Using the option-list prompt for "who is the chair?" was confusing the
-        # model with rules about preserving every option in a list.
-        if is_faculty_question(question):
-            prompt = build_faculty_prompt(question, context)
-        elif is_curriculum_question(question):
-            prompt = build_curriculum_prompt(question, context)
-        else:
-            prompt = build_general_prompt(question, context)
-
-        answer = call_llm(prompt)
-        answer = enforce_answer_language(question, answer)
-
-        if not answer:
+        # ------------------------------------------------------------------
+        # 3. Pick a generation strategy based on what we have
+        # ------------------------------------------------------------------
+        if not evidence and not context:
             answer = NOT_FOUND_MESSAGE
+        else:
+            evidence_text = format_evidence_for_prompt(evidence)
 
-        answer = format_answer_for_display(question, answer)
+            # PROMPT INPUT POLICY
+            # -------------------
+            # When we have structured evidence (high-confidence regex / table /
+            # PDF extraction), we send ONLY that to the LLM — not the broader
+            # RAG context. Two reasons:
+            #
+            #   1. Latency: combining evidence + 6 context passages produces a
+            #      ~5–6k token prompt, which Qwen 2.5 3B takes 60–90s to
+            #      process. With evidence alone the prompt is ~3k tokens and
+            #      the call returns in ~10–30s — safely under the 90s timeout.
+            #
+            #   2. Signal quality: structured evidence already gives the model
+            #      everything it needs to answer the question. Adding broader
+            #      RAG passages just dilutes the signal and increases the
+            #      chance the LLM gets distracted by an unrelated passage.
+            #
+            # If we have NO structured evidence we fall back to the RAG
+            # context, which is the path for purely free-form questions.
+            if evidence_text:
+                prompt_input = evidence_text
+                use_grounded_prompt = True
+            else:
+                prompt_input = context  # may be empty if both are missing
+                use_grounded_prompt = False
+
+            if prompt_input:
+                try:
+                    if use_grounded_prompt:
+                        answer = call_llm(
+                            build_grounded_generation_prompt(question, prompt_input),
+                            timeout=90,
+                            num_predict=260,
+                        )
+                    else:
+                        answer = call_llm(
+                            build_general_prompt(question, prompt_input),
+                            timeout=90,
+                            num_predict=260,
+                        )
+                except Exception:
+                    answer = ""
+                answer = enforce_answer_language(question, answer)
+            else:
+                answer = ""
+
+            if not answer or is_degenerate_output(answer):
+                answer = NOT_FOUND_MESSAGE
+            elif answer.count("── Evidence #") >= 2:
+                # Safety net: only treat as a prompt-echo failure if the
+                # model literally repeated TWO OR MORE evidence-block
+                # headers. A single occurrence (e.g. the model briefly
+                # mentioning "Evidence #1") is fine; we just don't want
+                # the entire labelled prompt dumped to the user.
+                answer = NOT_FOUND_MESSAGE
+
+            answer = format_answer_for_display(question, answer)
 
         ChatMessage.objects.create(
             conversation=conversation,
             question=question,
-            answer=answer
+            answer=answer,
         )
 
         return JsonResponse({
             "answer": answer,
-            "conversation_id": conversation.id
+            "conversation_id": conversation.id,
         })
 
     except requests.exceptions.ConnectionError:
@@ -3098,5 +3859,5 @@ def api_chat(request):
     except requests.exceptions.Timeout:
         return JsonResponse({"error": "The AI took too long to respond. Please try again."}, status=504)
 
-    except Exception as e:
-        return JsonResponse({"error": f"An unexpected error occurred. Please try again."}, status=500)
+    except Exception:
+        return JsonResponse({"error": "An unexpected error occurred. Please try again."}, status=500)
