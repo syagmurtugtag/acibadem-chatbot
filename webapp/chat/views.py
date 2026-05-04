@@ -84,6 +84,19 @@ GENERIC_EXTRACTIVE_TOKENS = {
     "tell",
 }
 
+GENERAL_RAG_GENERIC_TOKENS = GENERIC_EXTRACTIVE_TOKENS | {
+    "acibadem",
+    "universite",
+    "universitesi",
+    "university",
+    "mehmet",
+    "ali",
+    "aydinlar",
+    "hangi",
+    "nerede",
+    "zaman",
+}
+
 ACU_SITEMAP_URL_CACHE = None
 PDF_TABLE_CACHE = {}
 PROGRAM_OPTIONS_HUB_URL = "https://www.acibadem.edu.tr/ogrenci/ogrenci-isleri/cift-anadal-yandal-programlari"
@@ -1007,6 +1020,13 @@ def build_query_search_text(question):
         elif analysis["track"] == "minor":
             additions.extend(["yandal programi tanimlar madde 4 sertifika"])
 
+    folded_question = ascii_fold(question)
+    if any(hint in folded_question for hint in ["kuruldu", "kurulus", "kurulus tarihi", "ne zaman kuruldu"]):
+        additions.extend(["kuruldu kurulus 2007 universite hakkinda"])
+
+    if any(hint in folded_question for hint in ["nerede", "adres", "konum", "kampus", "kampusu"]):
+        additions.extend(["adres kampus kayisdagi atasehir iletisim"])
+
     return " ".join([question, *[item for item in additions if item]])
 
 
@@ -1189,6 +1209,49 @@ def get_vector_candidate_records(question, limit=RAG_VECTOR_RECORD_LIMIT):
     return records or None
 
 
+def get_lexical_candidate_records(query_search_text, limit=RAG_VECTOR_RECORD_LIMIT):
+    tokens = [
+        token for token in tokenize_for_rag(query_search_text)
+        if len(token) > 3 and ascii_fold(token) not in GENERAL_RAG_GENERIC_TOKENS
+    ]
+
+    if not tokens:
+        return []
+
+    try:
+        from django.db.models import Q
+
+        query = Q()
+        for token in list(dict.fromkeys(tokens))[:8]:
+            query |= Q(title__icontains=token)
+            query |= Q(topic__icontains=token)
+            query |= Q(url__icontains=token)
+            query |= Q(content__icontains=token)
+
+        records = [
+            record for record in KnowledgeBase.objects.filter(query)[:limit * 2]
+            if is_official_acu_source_url(record.url)
+        ]
+    except Exception:
+        return []
+
+    return records[:limit]
+
+
+def merge_candidate_records(*record_groups):
+    merged = []
+    seen = set()
+
+    for records in record_groups:
+        for record in records or []:
+            if record.id in seen:
+                continue
+            seen.add(record.id)
+            merged.append(record)
+
+    return merged
+
+
 def get_rag_context(question, top_k=RAG_TOP_K):
     query_search_text = build_query_search_text(question)
     query_tokens = tokenize_for_rag(query_search_text)
@@ -1197,7 +1260,11 @@ def get_rag_context(question, top_k=RAG_TOP_K):
     if not query_tokens:
         return ""
 
-    candidate_records = get_vector_candidate_records(question)
+    candidate_records = merge_candidate_records(
+        get_vector_candidate_records(question),
+        get_lexical_candidate_records(query_search_text),
+    )
+    candidate_records = candidate_records or None
     passages = build_rag_passages(candidate_records)
 
     if not passages and candidate_records is not None:
@@ -1677,6 +1744,9 @@ def extract_departments_from_faculty_child_pages(base_url):
 def answer_faculty_departments_question_directly(question):
     # Content-driven: needs the question to mention a faculty (matched by
     # record_matches_faculty_unit). No hint-list gate.
+    if not is_faculty_department_list_question(question):
+        return ""
+
     records = [
         record for record in KnowledgeBase.objects.all()
         if is_official_acu_source_url(record.url)
@@ -4383,7 +4453,7 @@ def build_llm_grounding_text(evidence_text, rag_context):
             "SEMANTIC SEARCH RESULTS\n"
             "These passages were retrieved with embedding similarity from "
             "the ACU knowledge base. Use them as additional grounding.\n\n"
-            f"{compact_evidence_for_generation(rag_context, max_chars=1500)}"
+            f"{compact_evidence_for_generation(rag_context, max_chars=1800)}"
         )
 
     return "\n\n".join(sections).strip()
@@ -4395,6 +4465,10 @@ def has_encoding_or_language_artifacts(answer):
         "Ã", "Ä", "Å", "�",
         "muhesenligi", "muheşenligi", "molukuler", "doya biyoloji",
         "universitesinin muhendislik ve doya",
+        "cift anadol", "biyoistatik", "yari-yili", "4.yari",
+        "muhendisligi 4", "zorunlu yaz staji",
+        "question'a", "passage", "relevant olan", "information'i",
+        "context'e", "source:", "url:",
     ]
     return any(marker in answer for marker in artifact_markers[:4]) or any(
         marker in folded for marker in artifact_markers[4:]
@@ -4462,6 +4536,136 @@ def llm_answer_failed_validation(answer, grounding_text, fallback_answer):
         return True
 
     return False
+
+
+def general_rag_answer_failed_validation(answer, grounding_text):
+    """Lighter validation for open-ended semantic RAG answers.
+
+    Structured extractors have exact official facts, so their validation can be
+    strict. General RAG answers are paraphrases over longer retrieved passages;
+    requiring every content token to appear verbatim rejects useful answers.
+    This check still blocks empty, degenerate, numerically unsupported, and
+    clearly ungrounded responses.
+    """
+    if not answer or answer.strip() == NOT_FOUND_MESSAGE:
+        return True
+
+    if is_degenerate_output(answer):
+        return True
+
+    if answer.count("── Evidence #") >= 2:
+        return True
+
+    if has_encoding_or_language_artifacts(answer):
+        return True
+
+    if not grounding_text:
+        return True
+
+    evidence_numbers = set(re.findall(r"\d+(?:[.,]\d+)?%?", grounding_text))
+    answer_numbers = set(re.findall(r"\d+(?:[.,]\d+)?%?", answer))
+    if any(number not in evidence_numbers for number in answer_numbers):
+        return True
+
+    answer_tokens = evidence_content_tokens(answer)
+    if not answer_tokens:
+        return True
+
+    grounding_folded = ascii_fold(grounding_text)
+    supported = [
+        token for token in answer_tokens
+        if token in grounding_folded
+        or any(variant in grounding_folded for variant in keyword_variants(token))
+    ]
+
+    # Open-ended answers may include small connective words or paraphrases, but
+    # most meaningful terms should still be traceable to official context.
+    return (len(supported) / max(len(answer_tokens), 1)) < 0.50
+
+
+def general_rag_extractive_fallback(question, grounding_text):
+    if not grounding_text:
+        return ""
+
+    folded_question = ascii_fold(question)
+    topic_hints = []
+    if any(hint in folded_question for hint in ["kuruldu", "kurulus", "ne zaman"]):
+        topic_hints.extend(["2007", "kurulan", "kuruldu", "kuruluş", "kurulus"])
+    if any(hint in folded_question for hint in ["nerede", "adres", "konum", "kampus", "kampusu"]):
+        topic_hints.extend(["istanbul", "anadolu", "kampus", "kampüs", "kayışdağı", "kayisdagi", "ataşehir", "atasehir", "adres"])
+    if any(hint in folded_question for hint in ["hakkinda", "hakkında", "bilgi", "kisaca", "kısaca"]):
+        topic_hints.extend(["kurulan", "tematik", "sağlık bilimleri", "saglik bilimleri", "akademik kadro", "teknolojik altyapı"])
+
+    query_tokens = [
+        token for token in evidence_content_tokens(question)
+        if ascii_fold(token) not in GENERAL_RAG_GENERIC_TOKENS
+    ]
+
+    raw_text = re.sub(r"Relevance Score:\s*[0-9.]+", " ", grounding_text)
+    raw_text = re.sub(r"Source:.*?(?=Topic:)", " ", raw_text, flags=re.DOTALL)
+    raw_text = re.sub(r"Topic:.*?(?=URL:)", " ", raw_text, flags=re.DOTALL)
+    raw_text = re.sub(r"URL:.*?(?=Passage:)", " ", raw_text, flags=re.DOTALL)
+    raw_text = raw_text.replace("Passage:", " ")
+    raw_text = re.sub(r"\s+", " ", raw_text).strip()
+
+    sentences = [
+        sentence.strip(" -")
+        for sentence in re.split(r"(?<=[.!?])\s+", raw_text)
+        if 40 <= len(sentence.strip()) <= 450
+    ]
+
+    scored = []
+    for sentence in sentences:
+        sentence = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+", " ", sentence)
+        sentence = re.sub(r"\s+", " ", sentence).strip()
+        readable = re.sub(r"[^\w\s.,;:!?()/%'’&\-\u00c0-\u024f]", "", sentence, flags=re.UNICODE)
+        if sentence and (len(readable) / max(len(sentence), 1)) < 0.90:
+            continue
+        if "[Page" in sentence or "[page" in sentence:
+            continue
+        start_match = re.search(r"Acıbadem Üniversitesi,\s*2007", sentence, flags=re.IGNORECASE)
+        if start_match:
+            sentence = sentence[start_match.start():].strip()
+
+        folded_sentence = ascii_fold(sentence)
+
+        score = 0
+        score += sum(3 for hint in topic_hints if ascii_fold(hint) in folded_sentence)
+        score += sum(1 for token in query_tokens if token in folded_sentence)
+
+        if "acibadem universitesi" in folded_sentence:
+            score += 2
+        if any(noise in folded_sentence for noise in EXTRACTIVE_NOISE_HINTS) and score < 6:
+            continue
+        if score > 0:
+            scored.append((score, sentence))
+
+    if not scored:
+        return ""
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best_sentences = []
+    seen = set()
+    for _score, sentence in scored:
+        normalized = ascii_fold(sentence)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        best_sentences.append(sentence)
+        if len(best_sentences) >= 2:
+            break
+
+    if not best_sentences:
+        return ""
+
+    if detect_question_language(question) == "Turkish":
+        return "Resmi kaynaklardan alınan ilgili bilgi:\n" + "\n".join(
+            f"- {sentence.rstrip('.') }." for sentence in best_sentences
+        )
+
+    return "Relevant information from official sources:\n" + "\n".join(
+        f"- {sentence.rstrip('.') }." for sentence in best_sentences
+    )
 
 
 @csrf_exempt
@@ -4566,8 +4770,11 @@ def api_chat(request):
             else:
                 answer = ""
 
-            if llm_answer_failed_validation(answer, prompt_input, fallback_answer):
-                answer = fallback_answer or localized_not_found(question)
+            if fallback_answer:
+                if llm_answer_failed_validation(answer, prompt_input, fallback_answer):
+                    answer = fallback_answer
+            elif general_rag_answer_failed_validation(answer, prompt_input):
+                answer = general_rag_extractive_fallback(question, context) or localized_not_found(question)
 
             answer = format_answer_for_display(question, answer)
 
