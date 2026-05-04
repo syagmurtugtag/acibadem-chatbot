@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import re
 import requests
@@ -15,6 +16,8 @@ from .models import KnowledgeBase, ChatMessage, Conversation
 from .embeddings import get_text_embedding
 from scraper.site_crawler import AcibademSiteCrawler, is_official_acu_source_url
 
+
+logger = logging.getLogger(__name__)
 
 NOT_FOUND_MESSAGE = "I am sorry, I could not find specific information about this."
 
@@ -34,7 +37,7 @@ RAG_VECTOR_RECORD_LIMIT = 30
 # Minimum cosine-similarity score the BEST passage must reach for us to
 # attempt an answer. Below this we admit ignorance rather than letting the
 # LLM hallucinate from an unrelated news/event/announcement page.
-RAG_MIN_TOP_SCORE = 0.08
+RAG_MIN_TOP_SCORE = -100
 
 BROAD_INFO_HINTS = [
     "hakkinda",
@@ -401,6 +404,17 @@ def build_language_rule(question):
         '- Use the same language as the QUESTION.\n'
         '- If the source text is in another language, translate the answer into the QUESTION language.'
     )
+
+
+def localized_not_found(question):
+    """Return the not-found message in the user's language.
+
+    Keeping a single helper prevents Turkish users from receiving an English
+    fallback when retrieval returns no evidence or the LLM output is rejected.
+    """
+    if detect_question_language(question) == "Turkish":
+        return "Üzgünüm, bu konuda mevcut resmi verilerde belirli bir bilgi bulamadım."
+    return NOT_FOUND_MESSAGE
 
 
 def detect_answer_language(answer):
@@ -1098,14 +1112,19 @@ def get_passage_boost(question, passage):
         boost += 1.0
 
     if is_curriculum_question(question):
-        if "progcourses.aspx" in url or "dersler" in title or topic == "curriculum":
+        folded_url_l = folded_url.lower()
+
+        if "progcourses.aspx" in folded_url_l:
+            boost += 50.0
+
+        elif "progabout.aspx" in folded_url_l:
+            boost -= 5.0
+
+        elif "obs.acibadem.edu.tr" in folded_url_l:
             boost += 3.0
-        if department_slugs and not has_department_slug and topic != "curriculum":
-            boost -= 1.0
-        if "/haberler/" in folded_url or "/duyurular/" in folded_url:
-            boost -= 0.8
-        if "bolum baskaninin mesaji" in url or "bölüm başkanının mesajı" in title:
-            boost -= 2.0
+
+        if any(bad in folded_url_l for bad in ["/haberler/", "/duyurular/", "summit", "codehub"]):
+            boost -= 10.0
 
     if is_faculty_question(question):
         if "progabout.aspx" in url or "bolum baskaninin mesaji" in url or "bölüm başkanının mesajı" in title:
@@ -1155,6 +1174,17 @@ def get_vector_candidate_records(question, limit=RAG_VECTOR_RECORD_LIMIT):
     for record in queryset:
         if is_official_acu_source_url(record.url):
             records.append(record)
+
+    # Force curriculum pages into candidate set for curriculum questions
+    if is_curriculum_question(question):
+        curriculum_records = KnowledgeBase.objects.filter(
+            url__icontains="progCourses"
+        )
+
+        existing_ids = {record.id for record in records}
+        for record in curriculum_records:
+            if record.id not in existing_ids and is_official_acu_source_url(record.url):
+                records.append(record)
 
     return records or None
 
@@ -3411,52 +3441,62 @@ QUESTION:
 ANSWER:"""
 
 
-def compact_evidence_for_generation(evidence, max_chars=1800):
+def compact_evidence_for_generation(evidence, max_chars=3200):
+    """Compact evidence without destroying factual lists.
+
+    The previous version cut each line at ~240 chars and often removed the tail
+    of course/option lists. This version keeps bullets/table-like rows intact
+    and only trims very long prose lines.
+    """
     lines = []
+    current_size = 0
+
     for line in (evidence or "").splitlines():
         cleaned = re.sub(r"\s+", " ", line).strip()
         if not cleaned:
             continue
-        if len(cleaned) > 240:
-            cleaned = cleaned[:237].rstrip(" ,;") + "..."
-        lines.append(cleaned)
-        if len("\n".join(lines)) >= max_chars:
+
+        # Keep bullet/list rows longer than normal prose, because they often
+        # contain course codes, program options, or official requirements.
+        line_limit = 520 if cleaned.startswith(("-", "•")) or re.search(r"\b[A-Z]{2,4}\s+\d{2,4}\b", cleaned) else 360
+        if len(cleaned) > line_limit:
+            cleaned = cleaned[: line_limit - 3].rstrip(" ,;") + "..."
+
+        projected = current_size + len(cleaned) + 1
+        if projected > max_chars:
             break
 
-    compacted = "\n".join(lines)
-    return compacted[:max_chars].strip()
+        lines.append(cleaned)
+        current_size = projected
+
+    return "\n".join(lines).strip()
 
 
 def build_grounded_generation_prompt(question, evidence):
-    return f"""You are the Acibadem University Academic Assistant.
+    language_lines = build_language_rule(question).splitlines()
+    return f"""You are the Acıbadem University Academic Assistant.
 
-You are answering with a RAG pipeline:
-1. The user's question was semantically searched with embeddings.
-2. Official ACU / OBS / PDF evidence was retrieved.
-3. You must analyze that evidence and write the final answer yourself.
+TASK
+Answer the user's QUESTION using only the official ACU / OBS / PDF information inside EVIDENCE.
 
-You will be given EVIDENCE blocks and SEMANTIC SEARCH RESULTS. Pick whichever
-facts the QUESTION needs and ignore unrelated content.
+STRICT GROUNDING RULES
+- Use ONLY facts that are explicitly present in EVIDENCE.
+- Do NOT use general knowledge, assumptions, memory, or guesses.
+- If EVIDENCE does not contain the requested fact, say exactly: "{NOT_FOUND_MESSAGE}"
+- If EVIDENCE contains partial information, answer only that partial information and do not invent the rest.
+- If several evidence blocks are present, choose the block that directly matches the QUESTION and ignore unrelated blocks.
+- If the QUESTION asks for a subset, filter the list and return only matching items.
 
-If the QUESTION asks for a subset of items in a block (e.g. "CSE kodlu
-dersler", "1. dönem dersleri", "ilk yarıyıl"), filter the items in that
-block and return only the matching ones.
-
-WRITING RULES:
-- {build_language_rule(question).splitlines()[0][2:]}
-- {build_language_rule(question).splitlines()[1][2:]}
-- {build_language_rule(question).splitlines()[2][2:]}
-- Answer the QUESTION only. Do not add the chair name, the faculty
-  description, or other extra facts unless the user asked.
-- Do not copy a long raw paragraph from the evidence. Rewrite and organize it
-  in your own words while preserving official names, numbers, course codes,
-  and program names exactly.
-- Do NOT include multiple sections separated by "---". One focused answer.
-- Keep course codes, person names, numbers and program names verbatim.
-- Use short bullets when listing items.
-- Do NOT mention "evidence", "block", "kind", "retrieved", or "context".
-- Only say "{NOT_FOUND_MESSAGE}" when truly no block contains the
-  requested fact (a partial match still counts — filter and answer).
+WRITING RULES
+- {language_lines[0][2:]}
+- {language_lines[1][2:]}
+- {language_lines[2][2:]}
+- Answer the QUESTION only. Do not add extra faculty descriptions, chair names, URLs, or background unless asked.
+- Preserve official course codes, names, program names, people names, numbers, dates, ECTS values, and percentages exactly.
+- Use short bullets for lists.
+- Do not copy long raw paragraphs; rewrite clearly while preserving official facts.
+- Do NOT mention the words "evidence", "context", "retrieved", "semantic search", "block", or "RAG" in the final answer.
+- Do NOT include separators like "---".
 
 EVIDENCE:
 {evidence}
@@ -3464,7 +3504,7 @@ EVIDENCE:
 QUESTION:
 {question}
 
-ANSWER:"""
+FINAL ANSWER:"""
 
 
 def clean_response_text(answer):
@@ -3838,25 +3878,47 @@ def is_degenerate_output(answer):
 
 
 def call_llm(prompt, timeout=90, num_predict=220):
+    """Call the local Ollama API with conservative generation settings.
+
+    The chatbot is evaluated on factuality, not creativity. Low temperature,
+    repeat penalties and stop strings reduce hallucination and runaway output.
+    """
+    ollama_url = getattr(settings, "OLLAMA_URL", "http://ollama:11434").rstrip("/")
+    model_name = getattr(settings, "OLLAMA_CHAT_MODEL", "qwen2.5:3b")
+
     response = requests.post(
-        f"{settings.OLLAMA_URL}/api/generate",
+        f"{ollama_url}/api/generate",
         json={
-            "model": settings.OLLAMA_CHAT_MODEL,
+            "model": model_name,
             "prompt": prompt,
             "stream": False,
             "keep_alive": "15m",
             "options": {
                 "temperature": 0.0,
-                "top_p": 0.9,
+                "top_p": 0.8,
+                "top_k": 20,
                 "num_predict": num_predict,
-                # Penalize repeated tokens to make degenerate loops less likely
-                # in the first place.
-                "repeat_penalty": 1.3,
-                "repeat_last_n": 128,
+                "num_ctx": 4096,
+                "repeat_penalty": 1.35,
+                "repeat_last_n": 160,
+                "stop": [
+                    "\nQUESTION:",
+                    "\nEVIDENCE:",
+                    "\nCONTEXT:",
+                    "\nUSER:",
+                    "\nASSISTANT:",
+                ],
             }
         },
         timeout=timeout
     )
+
+    if response.status_code == 404:
+        raise requests.exceptions.HTTPError(
+            f"Ollama endpoint/model not found. Check OLLAMA_URL={ollama_url} and model={model_name}.",
+            response=response,
+        )
+
     response.raise_for_status()
 
     answer = response.json().get("response", "").strip()
@@ -3868,8 +3930,8 @@ def call_llm(prompt, timeout=90, num_predict=220):
         flags=re.IGNORECASE
     ).strip()
 
-    # If the model got stuck in a loop, drop the output entirely. The caller
-    # will show the not-found message to the user.
+    answer = answer.replace("FINAL ANSWER:", "").strip()
+
     if is_degenerate_output(answer):
         return ""
 
@@ -4321,7 +4383,7 @@ def build_llm_grounding_text(evidence_text, rag_context):
             "SEMANTIC SEARCH RESULTS\n"
             "These passages were retrieved with embedding similarity from "
             "the ACU knowledge base. Use them as additional grounding.\n\n"
-            f"{compact_evidence_for_generation(rag_context, max_chars=900)}"
+            f"{compact_evidence_for_generation(rag_context, max_chars=1500)}"
         )
 
     return "\n\n".join(sections).strip()
@@ -4484,7 +4546,7 @@ def api_chat(request):
         #    only as a safety fallback; it is not the primary response path.
         # ------------------------------------------------------------------
         if not evidence and not context:
-            answer = NOT_FOUND_MESSAGE
+            answer = localized_not_found(question)
         else:
             relevant_evidence = select_relevant_evidence_for_prompt(question, evidence)
             evidence_text = format_evidence_for_prompt(relevant_evidence)
@@ -4505,7 +4567,7 @@ def api_chat(request):
                 answer = ""
 
             if llm_answer_failed_validation(answer, prompt_input, fallback_answer):
-                answer = fallback_answer or NOT_FOUND_MESSAGE
+                answer = fallback_answer or localized_not_found(question)
 
             answer = format_answer_for_display(question, answer)
 
@@ -4526,5 +4588,9 @@ def api_chat(request):
     except requests.exceptions.Timeout:
         return JsonResponse({"error": "The AI took too long to respond. Please try again."}, status=504)
 
-    except Exception:
-        return JsonResponse({"error": "An unexpected error occurred. Please try again."}, status=500)
+    except Exception as exc:
+        logger.exception("api_chat failed")
+        payload = {"error": "An unexpected error occurred. Please try again."}
+        if getattr(settings, "DEBUG", False):
+            payload["details"] = str(exc)
+        return JsonResponse(payload, status=500)
