@@ -171,9 +171,18 @@ CURRICULUM_QUESTION_HINTS = [
 
 COMMON_COURSE_HINTS = [
     "ortak",
+    "ortak ders",
+    "ortak dersler",
+    "dersler ortak",
+    "dersleri ortak",
+    "ortak olan ders",
     "common",
+    "common course",
+    "common courses",
     "both",
     "same course",
+    "shared course",
+    "shared courses",
     "aynı ders",
     "ayni ders",
 ]
@@ -2262,6 +2271,79 @@ def answer_common_courses_from_official_records(question):
     )
 
 
+# Detect a course-code PREFIX the user is asking about. Examples that should
+# match: "CSE kodlu dersler", "MAT prefix", "BME ile başlayan dersler",
+# "ENG dersleri". Case-insensitive — users often type lowercase.
+_COURSE_PREFIX_RE = re.compile(
+    r"\b([A-Za-z]{2,4})\b\s*"
+    r"(?:kodlu|kodu|kod|prefix|ile\s+ba(?:s|ş)layan|ders)",
+    re.IGNORECASE,
+)
+
+# Course-code prefixes that uniquely belong to a department offered by ACU.
+# The values are the canonical lower-case English department key (matches
+# DEPARTMENT_TITLE_MAP). When the user asks "BME kodlu dersler nelerdir"
+# without naming a department, we infer that they mean Biomedical
+# Engineering. Service-course prefixes that span many departments
+# (MAT, PHY, CHE, ENG, TUR, ATA, …) are deliberately NOT in this map —
+# they don't map to a single owning program.
+COURSE_CODE_TO_DEPARTMENT = {
+    "CSE": "computer engineering",
+    "BME": "biomedical engineering",
+    "MBG": "molecular biology and genetics",
+    "PSY": "psychology",
+    "SOC": "sociology",
+    "NUR": "nursing",
+    "NUT": "nutrition and dietetics",
+    "PTR": "physiotherapy and rehabilitation",
+    "PHY": None,    # service course (used by every engineering dept)
+    "MAT": None,    # service course
+    "CHE": None,    # service course
+    "ENG": None,    # English service course
+    "TUR": None,    # Turkish service course
+    "ATA": None,    # Atatürk service course
+}
+
+
+def infer_department_from_code(prefix):
+    """Map a course-code prefix to its owning department (English canonical),
+    or None if the prefix is shared / unknown.
+    """
+    if not prefix:
+        return None
+    return COURSE_CODE_TO_DEPARTMENT.get(prefix.upper())
+
+# Common stop-words that the regex above would otherwise mistake for a
+# course code (because they're 2–4 letters next to "ders").
+_COURSE_PREFIX_STOPWORDS = {
+    "VE", "ILE", "BU", "AT", "ON", "BIR", "TUM", "TÜM",
+    "HER", "BAZI", "BAZ", "NE", "OL", "SON", "ILK", "İLK",
+    "YENI", "YENİ", "ESKI", "ESKİ", "DERSI", "DERSİ", "DERS",
+    "OLAN", "TUM",
+}
+
+
+def detect_course_code_prefix(question):
+    """Return e.g. 'CSE' if the user asks for "CSE kodlu dersler".
+
+    Case-insensitive, but always returns the prefix uppercased (course
+    codes in ACU records are uppercase). When the prefix is detected the
+    curriculum extractor pre-filters the course list so the LLM doesn't
+    have to do its own (unreliable) filtering on a long list of items.
+    """
+    match = _COURSE_PREFIX_RE.search(question or "")
+    if not match:
+        return None
+    prefix = match.group(1).upper()
+    if len(prefix) < 2 or prefix in _COURSE_PREFIX_STOPWORDS:
+        return None
+    return prefix
+
+
+def _filter_courses_by_prefix(courses, prefix):
+    return [c for c in courses if c.upper().startswith(f"{prefix} ")]
+
+
 def answer_curriculum_from_official_record(question):
     # NOTE: We deliberately do NOT gate on a hint list (e.g. "is this a
     # curriculum question?"). The extractor is content-driven: if the
@@ -2269,11 +2351,28 @@ def answer_curriculum_from_official_record(question):
     # for it, we extract courses. The LLM downstream decides whether the
     # extracted evidence is relevant to the user's actual question.
 
+    # Did the user ask for a specific course-code prefix (e.g. "CSE kodlu")?
+    code_prefix = detect_course_code_prefix(question)
+
+    # If the question doesn't name a department but does name a code prefix
+    # owned by a single department (e.g. "BME kodlu dersler" implies
+    # Biomedical Engineering), use that as the matching question.
+    matching_question = question
+    if not detect_department(question):
+        inferred = infer_department_from_code(code_prefix)
+        if inferred:
+            display = (
+                DEPARTMENT_TURKISH_TITLE_MAP.get(inferred)
+                or DEPARTMENT_TITLE_MAP.get(inferred)
+                or inferred
+            )
+            matching_question = f"{display} {question}"
+
     records = [
         record for record in KnowledgeBase.objects.all()
         if is_official_acu_source_url(record.url)
         and normalize_text(record.topic) == "curriculum"
-        and record_matches_department(record, question)
+        and record_matches_department(record, matching_question)
     ]
 
     # Sort so the most current / active program is tried first. Stale
@@ -2284,6 +2383,10 @@ def answer_curriculum_from_official_record(question):
     if semester is None and mentions_semester_scope(question):
         return "Soruda hangi yarıyıl/dönem istendiğini net anlayamadım. Lütfen örneğin \"3. yarıyıl\" veya \"üçüncü yarıyıl\" şeklinde yazın."
 
+    # `code_prefix` and `matching_question` were already computed above to
+    # decide which records to consider. Reuse them below for course filtering
+    # and the answer label.
+
     for record in records:
         # OBS pages have explicit "<N>.Yarıyıl Ders Planı" sections; respect
         # them when the user asks about a specific semester. Other (non-OBS)
@@ -2292,27 +2395,46 @@ def answer_curriculum_from_official_record(question):
         if not courses:
             continue
 
-        department_name = get_department_display_name(question)
-        if detect_question_language(question) == "Turkish":
-            if semester == 1:
-                label = "ilk dönem zorunlu dersleri"
-            elif semester == 2:
-                label = "ikinci dönem zorunlu dersleri"
-            elif semester:
-                label = f"{semester}. yarıyıl zorunlu dersleri"
-            else:
-                label = "zorunlu dersleri"
-            return f"{department_name} {label}: " + ", ".join(courses) + "."
+        # Apply the prefix filter HERE in Python rather than relying on the
+        # LLM to do it correctly. LLMs frequently truncate or miscopy long
+        # filtered lists (e.g. 17 → 7 items, with one item having the wrong
+        # course name). Deterministic filtering avoids both failure modes.
+        if code_prefix:
+            filtered = _filter_courses_by_prefix(courses, code_prefix)
+            if filtered:
+                courses = filtered
 
-        if semester == 1:
-            label = "first-semester required courses"
+        # Use matching_question (which includes the inferred department name
+        # if the user only gave a code prefix) so the label has the correct
+        # department even when the original question was just "BME kodlu
+        # dersler nelerdir".
+        department_name = get_department_display_name(matching_question)
+        is_turkish = detect_question_language(question) == "Turkish"
+
+        if is_turkish:
+            if code_prefix:
+                base_label = f"{code_prefix} kodlu zorunlu dersleri"
+            elif semester == 1:
+                base_label = "ilk dönem zorunlu dersleri"
+            elif semester == 2:
+                base_label = "ikinci dönem zorunlu dersleri"
+            elif semester:
+                base_label = f"{semester}. yarıyıl zorunlu dersleri"
+            else:
+                base_label = "zorunlu dersleri"
+            return f"{department_name} {base_label}: " + ", ".join(courses) + "."
+
+        if code_prefix:
+            base_label = f"required courses with prefix {code_prefix}"
+        elif semester == 1:
+            base_label = "first-semester required courses"
         elif semester == 2:
-            label = "second-semester required courses"
+            base_label = "second-semester required courses"
         elif semester:
-            label = f"semester-{semester} required courses"
+            base_label = f"semester-{semester} required courses"
         else:
-            label = "required courses"
-        return f"{department_name} {label}: " + ", ".join(courses) + "."
+            base_label = "required courses"
+        return f"{department_name} {base_label}: " + ", ".join(courses) + "."
 
     return ""
 
@@ -2536,7 +2658,33 @@ def extract_reverse_options_from_pdf_table(url, question, track):
 
 def should_include_reverse_program_options(question):
     q = ascii_fold(question)
-    return any(hint in q for hint in ["hangi bolumlerle", "hangi programlarla", "with which", "which departments"])
+
+    # Source-to-target wording: "Computer Engineering students can apply to
+    # which departments?" The answer should contain only the target programs.
+    if any(hint in q for hint in [
+        "ogrencileri hangi",
+        "ogrencileri ne",
+        "hangi bolumlerle",
+        "hangi programlarla",
+        "students can",
+        "major students can",
+        "with which",
+        "which departments can",
+    ]):
+        return False
+
+    # Reverse wording: "Which majors can apply to this program?"
+    return any(hint in q for hint in [
+        "bu programa",
+        "programina",
+        "bolumune",
+        "kimler",
+        "hangi anadal",
+        "basvurabilen anadal",
+        "source majors",
+        "can apply for a double major in",
+        "can apply for a minor in",
+    ])
 
 
 def answer_program_options_from_official_table(question):
@@ -2739,6 +2887,27 @@ def score_option_record(record, department, track):
     return score
 
 
+def is_program_option_record(record, track):
+    title = normalize_text(record.title)
+    topic = normalize_text(record.topic)
+    url = ascii_fold(record.url)
+    combined = f"{title} {topic} {url}"
+
+    if "curriculum" in topic or "mufredat" in topic:
+        return False
+
+    if "option" in combined or "options" in combined:
+        return True
+
+    if track == "double major":
+        return "cift-anadal" in url and "program-listesi" in url
+
+    if track == "minor":
+        return "yandal" in url and "program-listesi" in url
+
+    return False
+
+
 def find_exact_option_record(question):
     # Content-driven: track + department detection is enough; no hint-list gate.
     track = detect_track(question)
@@ -2750,7 +2919,11 @@ def find_exact_option_record(question):
     department_title = DEPARTMENT_TITLE_MAP[source_department].lower()
     track_title = TRACK_TITLE_MAP[track].lower()
 
-    records = [record for record in KnowledgeBase.objects.all() if is_official_acu_source_url(record.url)]
+    records = [
+        record for record in KnowledgeBase.objects.all()
+        if is_official_acu_source_url(record.url)
+        and is_program_option_record(record, track)
+    ]
 
     for record in records:
         title = normalize_text(record.title)
@@ -3110,10 +3283,13 @@ def compact_evidence_for_generation(evidence, max_chars=1800):
 def build_grounded_generation_prompt(question, evidence):
     return f"""You are the Acibadem University Academic Assistant.
 
-You will be given several EVIDENCE blocks. Each block is labelled with its
-KIND (e.g. "Department curriculum", "Department head"). Pick whichever
-block(s) contain the facts the QUESTION needs and use them. Ignore the
-unrelated blocks.
+You are answering with a RAG pipeline:
+1. The user's question was semantically searched with embeddings.
+2. Official ACU / OBS / PDF evidence was retrieved.
+3. You must analyze that evidence and write the final answer yourself.
+
+You will be given EVIDENCE blocks and SEMANTIC SEARCH RESULTS. Pick whichever
+facts the QUESTION needs and ignore unrelated content.
 
 If the QUESTION asks for a subset of items in a block (e.g. "CSE kodlu
 dersler", "1. dönem dersleri", "ilk yarıyıl"), filter the items in that
@@ -3125,6 +3301,9 @@ WRITING RULES:
 - {build_language_rule(question).splitlines()[2][2:]}
 - Answer the QUESTION only. Do not add the chair name, the faculty
   description, or other extra facts unless the user asked.
+- Do not copy a long raw paragraph from the evidence. Rewrite and organize it
+  in your own words while preserving official names, numbers, course codes,
+  and program names exactly.
 - Do NOT include multiple sections separated by "---". One focused answer.
 - Keep course codes, person names, numbers and program names verbatim.
 - Use short bullets when listing items.
@@ -3171,6 +3350,8 @@ def clean_response_text(answer):
         cleaned = cleaned.replace(source, target)
 
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"(?m)^\s*[•*]\s*", "- ", cleaned)
+    cleaned = re.sub(r"(?m)^\s*-\s*$\n?", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -3246,6 +3427,8 @@ def format_general_answer(answer):
         return cleaned
 
     role_markers = [
+        " head of ",
+        " department is ",
         " dekanı ",
         " dekani ",
         " dekan yardımcısı ",
@@ -3259,7 +3442,11 @@ def format_general_answer(answer):
     if any(marker in ascii_fold(f" {cleaned} ") for marker in [ascii_fold(item) for item in role_markers]):
         return "- " + cleaned.strip(" .") + "."
 
-    if " bölüm başkanı " in cleaned.lower() or "department head" in cleaned.lower():
+    if (
+        " bölüm başkanı " in cleaned.lower()
+        or "department head" in cleaned.lower()
+        or "head of the" in cleaned.lower()
+    ):
         return "- " + cleaned.strip(" .") + "."
 
     sentences = split_answer_sentences(cleaned)
@@ -3562,6 +3749,231 @@ def option_present_in_answer(option, answer):
     return option_norm in answer_norm
 
 
+# Question-type → preferred evidence-kind mapping for the authoritative fast
+# path. Every extractor in collect_structured_evidence already produces a
+# clean, ready-to-display Turkish/English sentence. When a question maps
+# unambiguously to one of these extractors, we show its output directly
+# to preserve exact course lists, names, numbers, and program options.
+#
+# Each rule is (keyword_hints, evidence_kind_prefix). A question matches a
+# rule when ANY of the keywords appears in the ascii-folded question text.
+# Rules are evaluated in order; the first match wins.
+_BYPASS_RULES = (
+    # 1) Person inquiries — "who is the chair / dean?"
+    (
+        ("kim", "kimdir", "who is", "who's", "who leads",
+         "head of", "department head", "department chair", "chair of",
+         "başkan", "baskan", "dekan", "dean", "rector", "rektor", "rektör"),
+        ("Department head", "Academic role holder"),
+    ),
+    # 2) Program options — "which departments can X students do double major / minor with?"
+    (
+        ("cap yapabilir", "çap yapabilir", "yandal yapabilir",
+         "double major", "minor program", "minor with",
+         "hangi programlarla", "hangi bolumlerle", "hangi bölümlerle",
+         "hangi programlara", "hangi bölümlere", "hangi bolumlere",
+         "with which", "available for double major", "available for minor",
+         "basvurabilir", "başvurabilir", "apply for"),
+        ("Program options table", "Direct option-record match"),
+    ),
+    # 3) Application requirements — "what are the prerequisites?"
+    (
+        ("gereklilik", "gereklikleri", "şart", "sart", "şartları", "sartlari",
+         "koşul", "kosul", "koşulları", "kosullari", "başvuru", "basvuru",
+         "kabul kosulu", "kabul koşulu", "requirement", "criteria",
+         "conditions", "prerequisite"),
+        ("Application requirements",),
+    ),
+    # 4) Faculty → list of departments — "what departments are in X faculty?"
+    (
+        ("hangi bolumler", "hangi bölümler", "what departments",
+         "kaç bölüm", "kac bolum", "kaç tane bölüm", "kac tane bolum",
+         "kaç bölüm var", "kac bolum var", "bölüm var", "bolum var",
+         "how many departments", "number of departments",
+         "fakultesinde hangi", "fakültesinde hangi",
+         "departments in", "fakultenin bolumleri", "fakültenin bölümleri"),
+        ("Faculty department list",),
+    ),
+    # 5) Common courses — "what courses do A and B share?"
+    (
+        ("ortak", "ortak ders", "ortak dersler", "dersler ortak",
+         "dersleri ortak", "ortak olan ders", "common", "common course",
+         "common courses", "ikisinde de", "her iki", "shared course",
+         "shared courses"),
+        ("Common courses",),
+    ),
+    # 6) Curriculum lookups — only fire when question clearly asks about
+    #    courses (prefix, semester, or generic). Lists are deterministically
+    #    filtered in Python before the bypass returns them, so the LLM is
+    #    never asked to truncate them.
+    (
+        ("kodlu", "ile başlayan", "ile baslayan",
+         "ilk donem", "ilk dönem", "ikinci donem", "ikinci dönem",
+         "1. donem", "1.donem", "1. dönem", "1.dönem",
+         "2. donem", "2.donem", "2. dönem", "2.dönem",
+         "yariyil", "yarıyıl", "first semester", "second semester",
+         "müfredat", "mufredat", "ders planı", "ders plani",
+         "ders listesi", "course list", "compulsory course",
+         "zorunlu ders", "required course",
+         "hangi dersler", "dersleri nelerdir", "course code"),
+        ("Department curriculum",),
+    ),
+    # 7) Definition — "what is double major / minor?"
+    (
+        ("nedir", "ne demek", "what is", "tanım", "tanim", "define"),
+        ("Program definition",),
+    ),
+    # 8) Library / campus information — broad official-source questions.
+    (
+        ("kütüphane", "kutuphane", "library", "e-kaynak", "elektronik kaynak"),
+        ("Library information",),
+    ),
+)
+
+
+def _pick_authoritative_answer(question, evidence):
+    """Return a single ready-to-display answer if exactly one evidence kind
+    cleanly matches the question shape; otherwise return "".
+
+    The structured extractors in collect_structured_evidence produce
+    well-formed answers for exact factual lookups. This path shows the
+    extractor's output when the question shape is unambiguous, which keeps
+    course lists, person names, numbers, and program names intact.
+
+    When no rule matches, the api_chat path falls through to the regular
+    LLM flow with all evidence as context — that is the only path that
+    needs LLM judgement (e.g. open-ended general questions).
+    """
+    if not evidence:
+        return ""
+
+    folded = ascii_fold((question or "").lower())
+
+    for hints, allowed_kinds in _BYPASS_RULES:
+        if not any(hint in folded for hint in hints):
+            continue
+
+        for block in evidence:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("kind", "")
+            body = (block.get("body") or "").strip()
+            if not body:
+                continue
+            if any(kind.startswith(prefix) for prefix in allowed_kinds):
+                return body
+
+    return ""
+
+
+# Backwards-compatibility alias for the older single-purpose helper.
+def _person_answer_if_question_asks_for_one(question, evidence):
+    return _pick_authoritative_answer(question, evidence)
+
+
+def is_library_question(question):
+    folded = ascii_fold(question)
+    return any(term in folded for term in [
+        "kutuphane",
+        "library",
+        "e kaynak",
+        "elektronik kaynak",
+    ])
+
+
+def answer_library_question_from_official_records(question):
+    if not is_library_question(question):
+        return ""
+
+    records = [
+        record for record in KnowledgeBase.objects.all()
+        if is_official_acu_source_url(record.url)
+        and (
+            "kutuphane" in ascii_fold(record.title)
+            or "kutuphane" in ascii_fold(record.url)
+            or "library.acibadem.edu.tr" in (record.url or "").lower()
+        )
+    ]
+    if not records:
+        return ""
+
+    def priority(record):
+        title = ascii_fold(record.title)
+        url = (record.url or "").lower()
+        score = 0
+        if "kutuphane ve elektronik kaynaklar" in title:
+            score += 20
+        if "library.acibadem.edu.tr" in url:
+            score += 12
+        if "kampus-olanaklari" in url:
+            score += 8
+        return score
+
+    record = max(records, key=priority)
+    def clean_library_fact(sentence):
+        cleaned = re.sub(r"\s+", " ", sentence or "").strip(" .")
+        if not cleaned:
+            return ""
+        if "Ana içeriğe atla" in cleaned:
+            marker = "Kerem Aydınlar Kampüsü"
+            if marker in cleaned:
+                cleaned = cleaned[cleaned.index(marker):].strip()
+            else:
+                return ""
+        if len(cleaned) > 420:
+            for marker in [
+                "Merkez Kütüphane",
+                "Okuyucularına",
+                "Kütüphanede",
+                "Basılı Koleksiyon",
+                "Elektronik Koleksiyon",
+            ]:
+                if marker in cleaned:
+                    cleaned = cleaned[cleaned.index(marker):].strip()
+                    break
+        return cleaned[:520].strip(" .")
+
+    sentences = split_answer_sentences(record.content)
+    useful = []
+    for sentence in sentences:
+        folded = ascii_fold(sentence)
+        if any(term in folded for term in [
+            "kutuphane",
+            "koleksiyon",
+            "elektronik",
+            "veritabani",
+            "e kitap",
+            "calisma",
+            "7/24",
+            "oturma",
+            "materyal",
+            "kaynak",
+            "rezervasyon",
+            "iletisim",
+        ]):
+            fact = clean_library_fact(sentence)
+            if fact:
+                useful.append(fact)
+        if len(useful) >= 7:
+            break
+
+    if not useful:
+        useful = [record.content[:1200].strip()]
+
+    if detect_question_language(question) == "Turkish":
+        return (
+            "ACU kütüphanesi hakkında resmi kaynaklardan çıkarılan bilgiler:\n- "
+            + "\n- ".join(useful)
+            + "."
+        )
+
+    return (
+        "Information about the ACU library from official sources:\n- "
+        + "\n- ".join(useful)
+        + "."
+    )
+
+
 def collect_structured_evidence(question):
     """Run every high-precision extractor and collect non-empty results.
 
@@ -3659,7 +4071,13 @@ def collect_structured_evidence(question):
         answer_application_requirements_from_regulation(question),
     )
 
-    # 9. Direct option-record match (e.g. "Computer Engineering Double Major Options")
+    # 9. Library / electronic resources from official ACU library pages
+    _add(
+        "Library information (official ACU library pages)",
+        answer_library_question_from_official_records(question),
+    )
+
+    # 10. Direct option-record match (e.g. "Computer Engineering Double Major Options")
     option_record = find_exact_option_record(question)
     if option_record:
         structured_context, _options = build_structured_context_from_record(option_record)
@@ -3671,7 +4089,31 @@ def collect_structured_evidence(question):
     return evidence
 
 
-def format_evidence_for_prompt(evidence):
+def select_relevant_evidence_for_prompt(question, evidence):
+    if not evidence:
+        return []
+
+    folded = ascii_fold((question or "").lower())
+    selected = []
+
+    for hints, allowed_kinds in _BYPASS_RULES:
+        if not any(hint in folded for hint in hints):
+            continue
+
+        for block in evidence:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("kind", "")
+            if any(kind.startswith(prefix) for prefix in allowed_kinds):
+                selected.append(block)
+
+        if selected:
+            return selected
+
+    return evidence[:3]
+
+
+def format_evidence_for_prompt(evidence, max_body_chars=1800):
     """Render labelled evidence blocks into a single string for the LLM prompt.
 
     Each block becomes:
@@ -3694,15 +4136,120 @@ def format_evidence_for_prompt(evidence):
             # Backwards-compatibility for old plain-string evidence.
             kind = "evidence"
             body = str(block)
+        body = compact_evidence_for_generation(body, max_chars=max_body_chars)
         parts.append(f"── Evidence #{index} — {kind} ──\n{body}")
     return "\n\n".join(parts)
+
+
+def build_llm_grounding_text(evidence_text, rag_context):
+    """Combine structured evidence with semantic-search context for the LLM.
+
+    Structured evidence is precise, while the vector-RAG context proves that
+    the answer still comes from semantic retrieval over official ACU content.
+    The semantic context is compacted so it helps the model without drowning
+    the high-confidence evidence.
+    """
+    sections = []
+
+    if evidence_text:
+        sections.append(
+            "STRUCTURED OFFICIAL EVIDENCE\n"
+            "These facts were extracted from official ACU pages, OBS pages, "
+            "or official PDF tables.\n\n"
+            f"{evidence_text}"
+        )
+
+    if rag_context:
+        sections.append(
+            "SEMANTIC SEARCH RESULTS\n"
+            "These passages were retrieved with embedding similarity from "
+            "the ACU knowledge base. Use them as additional grounding.\n\n"
+            f"{compact_evidence_for_generation(rag_context, max_chars=900)}"
+        )
+
+    return "\n\n".join(sections).strip()
+
+
+def has_encoding_or_language_artifacts(answer):
+    folded = ascii_fold(answer)
+    artifact_markers = [
+        "Ã", "Ä", "Å", "�",
+        "muhesenligi", "muheşenligi", "molukuler", "doya biyoloji",
+        "universitesinin muhendislik ve doya",
+    ]
+    return any(marker in answer for marker in artifact_markers[:4]) or any(
+        marker in folded for marker in artifact_markers[4:]
+    )
+
+
+def llm_answer_failed_validation(answer, grounding_text, fallback_answer):
+    if not answer or answer.strip() == NOT_FOUND_MESSAGE:
+        return True
+
+    if is_degenerate_output(answer):
+        return True
+
+    if answer.count("── Evidence #") >= 2:
+        return True
+
+    if has_encoding_or_language_artifacts(answer):
+        return True
+
+    validation_text = fallback_answer or grounding_text
+    if not validation_text:
+        return False
+
+    # For exact person/role answers, 3B models sometimes keep the person's
+    # name but mangle the department/faculty title ("Mühendisliği" →
+    # "Mühendisi"). If the authoritative fallback has a titled role, require
+    # the answer to preserve the meaningful title tokens as well.
+    if any(role in ascii_fold(validation_text) for role in [
+        "bolum baskani",
+        "department head",
+        "dekani",
+        "dean",
+    ]):
+        normalized_fallback = re.sub(r"[^a-z0-9]+", " ", ascii_fold(validation_text)).strip()
+        normalized_answer = re.sub(r"[^a-z0-9]+", " ", ascii_fold(answer)).strip()
+        if normalized_fallback and normalized_fallback not in normalized_answer:
+            return True
+
+        fallback_tokens = [
+            token for token in re.findall(r"[a-z0-9]+", ascii_fold(validation_text))
+            if len(token) > 4
+            and token not in STOP_WORDS
+            and token not in {"resmi", "sayfasinda", "listelenen", "vardir"}
+        ]
+        answer_folded = ascii_fold(answer)
+        missing = [token for token in fallback_tokens if token not in answer_folded]
+        if missing:
+            return True
+
+    evidence_numbers = set(re.findall(r"\d+(?:[.,]\d+)?%?", validation_text))
+    answer_numbers = set(re.findall(r"\d+(?:[.,]\d+)?%?", answer))
+    if any(number not in evidence_numbers for number in answer_numbers):
+        return True
+
+    if not answer_is_grounded(answer, validation_text):
+        return True
+
+    if not answer_preserves_course_codes(answer, validation_text):
+        return True
+
+    if not answer_preserves_person_names(answer, validation_text):
+        return True
+
+    if not answer_preserves_bullet_items(answer, validation_text):
+        return True
+
+    return False
 
 
 @csrf_exempt
 def api_chat(request):
     """ACU chatbot endpoint.
 
-    Pipeline (rule-based dispatch removed in favour of a uniform RAG flow):
+    Pipeline (LLM-first RAG flow):
 
         1. Vector RAG (pgvector + nomic-embed) finds the most relevant
            knowledge-base passages for the question.
@@ -3716,10 +4263,8 @@ def api_chat(request):
               - all extractor evidence
               - the RAG context as additional grounding
            and produces the final answer in the question's language.
-
-    No "is this a curriculum question?" / "is this a faculty question?"
-    classifiers anywhere — that brittleness is gone. The LLM, given solid
-    grounded evidence, decides what to use.
+        5. Deterministic extractor output is used only as a safety fallback
+           when the LLM answer is empty, degenerate, or fails grounding checks.
     """
     if request.method != "POST":
         return JsonResponse({"error": "Only POST allowed"}, status=405)
@@ -3778,67 +4323,32 @@ def api_chat(request):
                 context = get_rag_context(question)
 
         # ------------------------------------------------------------------
-        # 3. Pick a generation strategy based on what we have
+        # 3. LLM-first RAG generation. The exact extractor answer is kept
+        #    only as a safety fallback; it is not the primary response path.
         # ------------------------------------------------------------------
         if not evidence and not context:
             answer = NOT_FOUND_MESSAGE
         else:
-            evidence_text = format_evidence_for_prompt(evidence)
-
-            # PROMPT INPUT POLICY
-            # -------------------
-            # When we have structured evidence (high-confidence regex / table /
-            # PDF extraction), we send ONLY that to the LLM — not the broader
-            # RAG context. Two reasons:
-            #
-            #   1. Latency: combining evidence + 6 context passages produces a
-            #      ~5–6k token prompt, which Qwen 2.5 3B takes 60–90s to
-            #      process. With evidence alone the prompt is ~3k tokens and
-            #      the call returns in ~10–30s — safely under the 90s timeout.
-            #
-            #   2. Signal quality: structured evidence already gives the model
-            #      everything it needs to answer the question. Adding broader
-            #      RAG passages just dilutes the signal and increases the
-            #      chance the LLM gets distracted by an unrelated passage.
-            #
-            # If we have NO structured evidence we fall back to the RAG
-            # context, which is the path for purely free-form questions.
-            if evidence_text:
-                prompt_input = evidence_text
-                use_grounded_prompt = True
-            else:
-                prompt_input = context  # may be empty if both are missing
-                use_grounded_prompt = False
+            relevant_evidence = select_relevant_evidence_for_prompt(question, evidence)
+            evidence_text = format_evidence_for_prompt(relevant_evidence)
+            prompt_input = build_llm_grounding_text(evidence_text, context)
+            fallback_answer = _pick_authoritative_answer(question, evidence)
 
             if prompt_input:
                 try:
-                    if use_grounded_prompt:
-                        answer = call_llm(
-                            build_grounded_generation_prompt(question, prompt_input),
-                            timeout=90,
-                            num_predict=260,
-                        )
-                    else:
-                        answer = call_llm(
-                            build_general_prompt(question, prompt_input),
-                            timeout=90,
-                            num_predict=260,
-                        )
+                    answer = call_llm(
+                        build_grounded_generation_prompt(question, prompt_input),
+                        timeout=105,
+                        num_predict=220,
+                    )
                 except Exception:
                     answer = ""
                 answer = enforce_answer_language(question, answer)
             else:
                 answer = ""
 
-            if not answer or is_degenerate_output(answer):
-                answer = NOT_FOUND_MESSAGE
-            elif answer.count("── Evidence #") >= 2:
-                # Safety net: only treat as a prompt-echo failure if the
-                # model literally repeated TWO OR MORE evidence-block
-                # headers. A single occurrence (e.g. the model briefly
-                # mentioning "Evidence #1") is fine; we just don't want
-                # the entire labelled prompt dumped to the user.
-                answer = NOT_FOUND_MESSAGE
+            if llm_answer_failed_validation(answer, prompt_input, fallback_answer):
+                answer = fallback_answer or NOT_FOUND_MESSAGE
 
             answer = format_answer_for_display(question, answer)
 

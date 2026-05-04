@@ -1,8 +1,10 @@
 # ACU AI Academic Assistant
 
-An official-source academic chatbot for Acibadem University.
+An official-source AI chatbot for Acibadem University.
 
-The system answers questions about Acibadem University academic information, Double Major (CAP), Minor programs, application requirements, curricula, department heads, and library information by using only official ACU web pages, official PDFs, and OBS/Bologna pages.
+The system answers questions about Acibadem University academic information, Double Major (CAP), Minor programs, application requirements, curricula, department heads, faculty information, and library information by using only official ACU web pages, official PDFs, and OBS/Bologna pages.
+
+It is not a keyword-only search project. The chatbot uses semantic retrieval with vector embeddings, official-source evidence extraction, and a local LLM-based response generation step.
 
 > CSE 322 - Cloud Computing | Spring 2026
 
@@ -23,12 +25,15 @@ The system answers questions about Acibadem University academic information, Dou
 - PostgreSQL database with pgvector support
 - Local LLM inference with Ollama and `llama3.2:3b`
 - Semantic retrieval with `nomic-embed-text` embeddings
-- RAG pipeline over official ACU sources
+- Retrieval-Augmented Generation (RAG) pipeline over official ACU sources
 - Playwright-based OBS/Bologna scraper for JavaScript-rendered curriculum pages
+- BeautifulSoup-based crawler for official ACU web pages
 - PDF table extraction for CAP/Minor program lists
 - Official regulation extraction for CAP/Minor application requirements
-- Grounded answer generation with validation against retrieved evidence
+- LLM-based grounded answer generation with validation against retrieved evidence
 - Response formatting layer for readable bullet points and short sections
+- Chat history and stored conversations
+- REST chat API for frontend communication
 - Django admin tools for knowledge-base inspection and scraping
 
 ---
@@ -41,7 +46,7 @@ The chatbot is designed to use only official Acibadem University sources:
 - official ACU PDF documents
 - `https://obs.acibadem.edu.tr/oibs/bologna/`
 
-Manual hard-coded question-answer records are not used as the knowledge source. Facts are retrieved from the scraped knowledge base and then passed through extraction, grounded generation, validation, and formatting steps.
+Manual hard-coded question-answer records are not used as the knowledge source. Facts are retrieved from the scraped knowledge base and then passed through semantic retrieval, structured evidence extraction, grounded LLM generation, validation, and formatting steps.
 
 ---
 
@@ -74,7 +79,7 @@ Windows Command Prompt:
 copy .env.example .env
 ```
 
-The default values are enough for local development and classroom demos.
+The default values are enough for local development and classroom demos. The default chat model is `llama3.2:3b` because it is lightweight enough for a 16 GB RAM laptop while still providing good Turkish output for this project.
 
 ### 3. Start the full system
 
@@ -83,6 +88,8 @@ docker compose up --build
 ```
 
 The first run can take several minutes because Docker downloads base images, Ollama pulls local models, Playwright installs Chromium, and the knowledge base starts bootstrapping.
+
+If you change the model in `.env`, rebuild/restart Docker Compose so both the web app and `ollama-init` use the same model value.
 
 ### 4. Open the application
 
@@ -133,7 +140,7 @@ docker compose exec webapp tail -f /tmp/embeddings.log
 
 ## RAG Pipeline
 
-The chatbot uses a guarded Retrieval-Augmented Generation pipeline:
+The chatbot uses a guarded Retrieval-Augmented Generation pipeline. The goal is to answer from official evidence while still generating a readable answer with the local language model.
 
 1. **Source loading**
    - ACU website pages are crawled with requests and BeautifulSoup.
@@ -151,18 +158,20 @@ The chatbot uses a guarded Retrieval-Augmented Generation pipeline:
    - Lexical and semantic scoring re-ranks passages.
 
 4. **Structured extraction**
-   - Department head questions use official page text and faculty management pages.
-   - Curriculum questions use OBS course tables.
-   - CAP/Minor option questions use official PDF tables.
+   - Department and dean questions use official department and faculty management pages.
+   - Curriculum and common-course questions use OBS course tables.
+   - CAP/Minor option questions use official program-list PDF tables.
    - CAP/Minor requirement questions use official regulation sections.
+   - Library questions use official ACU library pages.
 
 5. **Grounded generation**
-   - Retrieved evidence is passed to the local LLM.
-   - The model is instructed to rewrite and structure the answer without adding unsupported facts.
+   - Retrieved evidence is passed to the local LLM through a controlled prompt.
+   - The model is instructed to rewrite and structure the answer without adding unsupported facts or copying raw source text.
 
 6. **Validation and formatting**
    - Answers are checked against retrieved evidence to reduce hallucinations.
    - Final responses are formatted into short sections and bullet points.
+   - If the LLM output is empty, unsupported, or linguistically broken, the system falls back to the most reliable official evidence instead of inventing an answer.
 
 ---
 
@@ -226,11 +235,16 @@ docker compose exec webapp python manage.py fix_obs_titles
 
 Turkish examples:
 
-- `Bilgisayar Muhendisligi hangi bolumlerle CAP yapabilir?`
+- `Bilgisayar Muhendisligi ogrencileri hangi bolumlerle CAP yapabilir?`
+- `Bilgisayar Muhendisligi ogrencileri hangi bolumlerle yandal yapabilir?`
 - `CAP basvuru gereklilikleri nelerdir?`
 - `Yandal basvuru kosullari nelerdir?`
+- `Bilgisayar Muhendisligi bolum baskani kimdir?`
 - `Molekuler Biyoloji ve Genetik bolum baskani kimdir?`
-- `Bilgisayar Muhendisligi 1. yariyil zorunlu dersleri nelerdir?`
+- `Muhendislik ve Doga Bilimleri Fakultesi dekani kimdir?`
+- `Acibadem Universitesi Muhendislik ve Doga Bilimleri Fakultesinde kac bolum var?`
+- `Bilgisayar Muhendisligi ucuncu yariyilda hangi dersler var?`
+- `Biyomedikal Muhendisligi ile Bilgisayar Muhendisligi birinci sinifta hangi dersler ortak?`
 - `Acibadem Universitesi kutuphanesi hakkinda bilgi verir misin?`
 
 English examples:
@@ -238,6 +252,7 @@ English examples:
 - `Which programs can Computer Engineering students apply to for a double major?`
 - `What are the double major application requirements?`
 - `Who is the head of Molecular Biology and Genetics?`
+- `Who is the head of Computer Engineering?`
 
 ---
 
@@ -277,7 +292,7 @@ The Django admin panel can be used to inspect:
 - Chat messages
 - Conversations
 
-Knowledge-base admin actions include official-source scraping helpers. Manual local file upload and manual answer records are intentionally avoided for the main workflow.
+Knowledge-base admin actions include official-source scraping helpers. Manual local file upload and manual answer records are intentionally avoided for the main workflow so the chatbot remains evidence-driven instead of manually scripted.
 
 ---
 
@@ -355,10 +370,23 @@ Docker concepts used:
 
 ---
 
+## Demo Checklist
+
+For a classroom demo, a clean run should show:
+
+- `docker compose up --build` starts PostgreSQL, Ollama, and Django.
+- The chatbot opens at [http://localhost:8000](http://localhost:8000).
+- The admin panel opens at [http://localhost:8000/admin/](http://localhost:8000/admin/).
+- Questions are answered from official ACU/OBS/PDF evidence.
+- Answers are generated in a readable bullet-point format.
+- Chat history is stored and can be revisited.
+- Semantic search is available through pgvector embeddings.
+
+---
+
 ## Current Limitations
 
 - First startup can take time because models, Chromium, scraping, and embeddings are initialized.
 - OBS scraping runs in the background; some curriculum answers may improve after it finishes.
 - The local 3B model is small, so validation and formatting guardrails are used to keep answers grounded.
 - The project focuses on official ACU academic information, not general open-domain chat.
-

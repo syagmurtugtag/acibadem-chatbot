@@ -72,13 +72,13 @@
             </header>
             <div class="chat-box" id="chatBox">
                 <div class="message bot">
-                    <span class="bubble">Welcome! I am the <b>Acibadem University Academic Assistant</b>.<br><br>I can provide specific information about <b>Double Major</b> and <b>Minor</b> programs, application requirements, and regulations.<br><br>What would you like to learn today?</span>
+                    <span class="bubble">Welcome! I am the <b>Acibadem University Academic Assistant</b>.<br><br>I can answer questions using official ACU web pages, OBS/Bologna curriculum pages, and official PDF documents.<br><br>You can ask about departments, faculty roles, course plans, Double Major, Minor programs, and application requirements.</span>
                 </div>
             </div>
             <div class="input-container">
                 <div class="input-wrapper">
                     <input type="text" id="questionInput"
-                           placeholder="Ask about double major or minor programs..."
+                           placeholder="Ask about ACU departments, courses, CAP/Yandal, or faculty..."
                            onkeypress="if(event.key==='Enter') sendMessage()">
                     <button onclick="sendMessage()" id="sendBtn">Send</button>
                 </div>
@@ -122,7 +122,7 @@
             chatBox.innerHTML = '';
             chatBox.appendChild(createMessage(
                 'bot',
-                'Welcome! I am the <b>Acibadem University Academic Assistant</b>.<br><br>I can provide specific information about <b>Double Major</b> and <b>Minor</b> programs.<br><br>What would you like to learn today?',
+                'Welcome! I am the <b>Acibadem University Academic Assistant</b>.<br><br>I can answer questions using official ACU web pages, OBS/Bologna curriculum pages, and official PDF documents.<br><br>You can ask about departments, faculty roles, course plans, Double Major, Minor programs, and application requirements.',
                 { html: true }
             ));
         }
@@ -161,7 +161,7 @@
             chatBox.appendChild(createMessage('user', question));
             input.value = '';
             btn.disabled = true;
-            chatBox.appendChild(createMessage('bot', '...', { id: 'loading' }));
+            chatBox.appendChild(createMessage('bot', 'Searching official ACU sources and generating an answer...', { id: 'loading' }));
             chatBox.scrollTop = chatBox.scrollHeight;
 
             fetch('/api/chat/', {
@@ -169,8 +169,11 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ question: question, conversation_id: currentConversationId })
             })
-            .then(res => res.json())
-            .then(data => {
+            .then(res => res.json().then(data => ({ ok: res.ok, data })))
+            .then(({ ok, data }) => {
+                if (!ok) {
+                    throw new Error(data.error || 'The chatbot service returned an error.');
+                }
                 const loader = document.getElementById('loading');
                 if (loader) loader.remove();
 
@@ -199,6 +202,11 @@
             .catch(() => {
                 const loader = document.getElementById('loading');
                 if (loader) loader.remove();
+                chatBox.appendChild(createMessage(
+                    'bot',
+                    'The chatbot could not generate an answer right now. Please try again in a moment.'
+                ));
+                chatBox.scrollTop = chatBox.scrollHeight;
                 btn.disabled = false;
             });
         }
