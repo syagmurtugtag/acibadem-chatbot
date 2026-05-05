@@ -368,26 +368,3 @@ Docker concepts used:
 | Server | Gunicorn |
 | Containerization | Docker, Docker Compose |
 
----
-
-## Demo Checklist
-
-For a classroom demo, a clean run should show:
-
-- `docker compose up --build` starts PostgreSQL, Ollama, and Django.
-- The chatbot opens at [http://localhost:8000](http://localhost:8000).
-- The admin panel opens at [http://localhost:8000/admin/](http://localhost:8000/admin/).
-- Questions are answered from official ACU/OBS/PDF evidence.
-- Answers are generated in a readable bullet-point format.
-- Chat history is stored and can be revisited.
-- Semantic search is available through pgvector embeddings.
-
----
-
-## Current Limitations
-
-- First startup can take time because models, Chromium, scraping, and embeddings are initialized.
-- OBS scraping runs in the background; some curriculum answers may improve after it finishes.
-- The local 3B model is small, so validation and formatting guardrails are used to keep answers grounded.
-- The project focuses on official ACU academic information, not general open-domain chat.
-
