@@ -3228,6 +3228,8 @@ def extract_program_definition_from_regulation(question):
     definition = clean_regulation_clause(match.group("definition"))
     definition = re.sub(r"\s+program\s*ı$", " programı", definition, flags=re.IGNORECASE)
     definition = re.sub(r"\s+ifade\s+eder\.?$", "", definition, flags=re.IGNORECASE).strip(" .")
+    definition = re.sub(r"\böğrenci\s+nin\b", "öğrencinin", definition, flags=re.IGNORECASE)
+    definition = re.sub(r"\bya\s+ndal\b", "yandal", definition, flags=re.IGNORECASE)
 
     if not definition:
         return ""
@@ -3235,6 +3237,60 @@ def extract_program_definition_from_regulation(question):
     return (
         f"{heading} resmi yönergede şöyle tanımlanır:\n"
         f"- {definition}."
+    )
+
+
+def is_program_comparison_question(question):
+    folded = ascii_fold(question)
+    mentions_double_major = any(term in folded for term in ["cap", "cift anadal", "double major"])
+    mentions_minor = any(term in folded for term in ["yandal", "minor"])
+    asks_comparison = any(term in folded for term in [
+        "fark", "farki", "arasinda", "arasindaki", "karsilastir",
+        "difference", "compare", "comparison", "between",
+    ])
+    return mentions_double_major and mentions_minor and asks_comparison
+
+
+def extract_definition_bullet(answer):
+    match = re.search(r"^-\s*(.+)$", answer or "", flags=re.MULTILINE)
+    if not match:
+        return ""
+
+    definition = clean_response_text(match.group(1)).strip(" .")
+    definition = re.sub(r"\böğrenci\s+nin\b", "öğrencinin", definition, flags=re.IGNORECASE)
+    definition = re.sub(r"\bya\s+ndal\b", "yandal", definition, flags=re.IGNORECASE)
+    return definition
+
+
+def answer_program_comparison_from_regulation(question):
+    if not is_program_comparison_question(question):
+        return ""
+
+    double_major_definition = extract_definition_bullet(
+        extract_program_definition_from_regulation("çap nedir")
+    )
+    minor_definition = extract_definition_bullet(
+        extract_program_definition_from_regulation("yandal nedir")
+    )
+
+    if not double_major_definition or not minor_definition:
+        return ""
+
+    if detect_question_language(question) == "English":
+        return (
+            "According to the official regulation, the main difference is:\n"
+            f"- Double Major (CAP): {double_major_definition}.\n"
+            f"- Minor: {minor_definition}.\n"
+            "- In short: Double major is for earning two separate diplomas; "
+            "minor is for earning a minor certificate that does not replace a diploma."
+        )
+
+    return (
+        "Resmi yönergeye göre ÇAP ve yandal arasındaki temel fark:\n"
+        f"- ÇAP: {double_major_definition}.\n"
+        f"- Yandal: {minor_definition}.\n"
+        "- Kısa fark: ÇAP iki ayrı diploma almayı; yandal ise diploma yerine geçmeyen "
+        "yandal sertifikası almayı sağlar."
     )
 
 
@@ -4107,6 +4163,11 @@ _BYPASS_RULES = (
         ("nedir", "ne demek", "what is", "tanım", "tanim", "define"),
         ("Program definition",),
     ),
+    # 7b) Definition comparison — "what is the difference between CAP and minor?"
+    (
+        ("fark", "farki", "arasinda", "arasindaki", "difference", "compare", "comparison"),
+        ("Program comparison",),
+    ),
     # 8) Library / campus information — broad official-source questions.
     (
         ("kütüphane", "kutuphane", "library", "e-kaynak", "elektronik kaynak"),
@@ -4303,6 +4364,10 @@ def collect_structured_evidence(question):
         "Program definition (official regulation definition clause)",
         extract_program_definition_from_regulation(question),
     )
+    _add(
+        "Program comparison (official regulation definition clauses)",
+        answer_program_comparison_from_regulation(question),
+    )
 
     def_record = find_definition_record(question)
     if def_record and def_record.content:
@@ -4461,12 +4526,18 @@ def build_llm_grounding_text(evidence_text, rag_context):
 
 def has_encoding_or_language_artifacts(answer):
     folded = ascii_fold(answer)
+    if re.search(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", answer or ""):
+        return True
+
     artifact_markers = [
         "Ã", "Ä", "Å", "�",
         "muhesenligi", "muheşenligi", "molukuler", "doya biyoloji",
         "universitesinin muhendislik ve doya",
         "cift anadol", "biyoistatik", "yari-yili", "4.yari",
         "muhendisligi 4", "zorunlu yaz staji",
+        "diplomasal", "contanj", "kontenjinin", "chap'ta", "chap ta",
+        "students double major", "total student", "related programme",
+        "programme contanj", "program contanj",
         "question'a", "passage", "relevant olan", "information'i",
         "context'e", "source:", "url:",
     ]
